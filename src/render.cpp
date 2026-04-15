@@ -9,6 +9,7 @@
 #include "theme.h"
 #include "intern.h"
 #include "history.h"
+#include "filter.h"
 
 static ID2D1Factory          *g_d2d        = nullptr;
 static IDWriteFactory        *g_dw         = nullptr;
@@ -390,10 +391,15 @@ extern "C" void render_frame(const snapshot_t *snap)
     if (g_scroll_rows > max_scroll) g_scroll_rows = max_scroll;
     uint32_t start = (uint32_t)g_scroll_rows;
 
-    /* build sort order */
-    uint32_t n = snap->n_processes;
-    if (n > 1024) n = 1024;
-    for (uint32_t i = 0; i < n; ++i) g_sort_idx[i] = i;
+    /* visibility pass (filter) + sort */
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < snap->n_processes && n < 1024; ++i) {
+        if (g_filter_len > 0) {
+            const wchar_t *name = intern_get(snap->processes[i].image_name);
+            if (filter_score(g_filter_text, name) <= 0) continue;
+        }
+        g_sort_idx[n++] = i;
+    }
     if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
 
     for (uint32_t i = start; i < n; ++i) {

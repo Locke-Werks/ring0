@@ -33,6 +33,9 @@ static BOOL     g_mica;
 static unsigned g_selected_pid = 0xFFFFFFFFu;   /* sentinel for "nothing selected"
                                                    so we don't accidentally match
                                                    the System Idle Process at pid 0 */
+static wchar_t  g_filter_buf[256];
+static int      g_filter_len;
+static int      g_filter_caret;
 
 static int find_pid_index(const snapshot_t *s, unsigned pid)
 {
@@ -40,6 +43,41 @@ static int find_pid_index(const snapshot_t *s, unsigned pid)
     for (uint32_t i = 0; i < s->n_processes; ++i)
         if (s->processes[i].pid == pid) return (int)i;
     return -1;
+}
+
+static void push_filter(HWND hwnd)
+{
+    g_filter_buf[g_filter_len] = 0;
+    render_set_filter(g_filter_buf, g_filter_caret);
+    InvalidateRect(hwnd, NULL, FALSE);
+}
+
+static void filter_insert(HWND hwnd, wchar_t c)
+{
+    if (g_filter_len >= 255) return;
+    for (int i = g_filter_len; i > g_filter_caret; --i)
+        g_filter_buf[i] = g_filter_buf[i - 1];
+    g_filter_buf[g_filter_caret] = c;
+    ++g_filter_len;
+    ++g_filter_caret;
+    push_filter(hwnd);
+}
+
+static void filter_backspace(HWND hwnd)
+{
+    if (g_filter_caret == 0) return;
+    for (int i = g_filter_caret - 1; i < g_filter_len - 1; ++i)
+        g_filter_buf[i] = g_filter_buf[i + 1];
+    --g_filter_caret;
+    --g_filter_len;
+    push_filter(hwnd);
+}
+
+static void filter_clear(HWND hwnd)
+{
+    g_filter_len   = 0;
+    g_filter_caret = 0;
+    push_filter(hwnd);
 }
 
 static void select_index(HWND hwnd, int idx)
@@ -147,6 +185,17 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
 
+        /* filter caret / deletion */
+        if (wp == VK_BACK) { filter_backspace(hwnd); return 0; }
+        if (wp == VK_LEFT) {
+            if (g_filter_caret > 0) { --g_filter_caret; push_filter(hwnd); }
+            return 0;
+        }
+        if (wp == VK_RIGHT) {
+            if (g_filter_caret < g_filter_len) { ++g_filter_caret; push_filter(hwnd); }
+            return 0;
+        }
+
         const snapshot_t *s = snapshot_current();
         int cur = find_pid_index(s, g_selected_pid);
         switch (wp) {
@@ -157,12 +206,21 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case VK_HOME:  select_index(hwnd, 0);                return 0;
         case VK_END:   if (s) select_index(hwnd, (int)s->n_processes - 1); return 0;
         case VK_ESCAPE:
+            if (g_filter_len > 0) { filter_clear(hwnd); return 0; }
             g_selected_pid = 0xFFFFFFFFu;
             render_set_selected(0xFFFFFFFFu);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
         break;
+    }
+
+    case WM_CHAR: {
+        /* wp is the character code. ignore control combos and non-printable. */
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wp != L'/') return 0;
+        if (wp < 0x20) return 0;             /* control chars, handled in KEYDOWN */
+        filter_insert(hwnd, (wchar_t)wp);
+        return 0;
     }
 
     case WM_DESTROY:
