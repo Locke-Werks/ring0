@@ -2,6 +2,7 @@
 #include "ntapi.h"
 #include "intern.h"
 #include "history.h"
+#include "etw.h"
 #include <stdint.h>
 
 /* Snapshot arena pool. Four is enough cushion: the UI frame holds a snapshot
@@ -90,6 +91,13 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
         pr->_pad2         = 0;
         pr->_pad3         = 0;
 
+        etw_counters_t ec;
+        etw_counters_for(pr->pid, &ec);
+        pr->etw_disk_total = ec.disk_read + ec.disk_write;
+        pr->etw_net_total  = ec.net_in    + ec.net_out;
+        pr->disk_bps       = 0;
+        pr->net_bps        = 0;
+
         if (spi->ImageName.Buffer && spi->ImageName.Length) {
             size_t wlen = spi->ImageName.Length / sizeof(WCHAR);
             pr->image_name = intern_str(spi->ImageName.Buffer, wlen);
@@ -104,10 +112,10 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
     return snap;
 }
 
-/* Walk the new and previous process arrays and fill cpu_pct on cur as
-   normalized percent of total cpu (100 == all cores fully busy). O(n*m) is fine
-   at our process counts; we revisit if it ever becomes hot. */
-static void fill_cpu_pct(snapshot_t *cur, const snapshot_t *prev)
+/* Walk the new and previous process arrays and fill cpu_pct + disk/net rates
+   on cur as normalized deltas. O(n*m) is fine at our process counts; revisit
+   if it ever becomes hot. */
+static void fill_deltas(snapshot_t *cur, const snapshot_t *prev)
 {
     if (!prev || !g_num_cores) return;
     uint64_t dwall_ms = cur->timestamp - prev->timestamp;
@@ -118,10 +126,20 @@ static void fill_cpu_pct(snapshot_t *cur, const snapshot_t *prev)
         for (uint32_t j = 0; j < prev->n_processes; ++j) {
             const process_t *pp = &prev->processes[j];
             if (pp->pid != c->pid || pp->create_time != c->create_time) continue;
-            if (c->cpu_100ns < pp->cpu_100ns) break;
-            uint64_t dcpu_ms = (c->cpu_100ns - pp->cpu_100ns) / 10000;
-            uint64_t pct_x10 = (dcpu_ms * 1000) / (dwall_ms * g_num_cores);
-            c->cpu_pct = pct_x10 > 65535 ? 65535 : (uint16_t)pct_x10;
+
+            if (c->cpu_100ns >= pp->cpu_100ns) {
+                uint64_t dcpu_ms = (c->cpu_100ns - pp->cpu_100ns) / 10000;
+                uint64_t pct_x10 = (dcpu_ms * 1000) / (dwall_ms * g_num_cores);
+                c->cpu_pct = pct_x10 > 65535 ? 65535 : (uint16_t)pct_x10;
+            }
+            if (c->etw_disk_total >= pp->etw_disk_total) {
+                uint64_t bps = (c->etw_disk_total - pp->etw_disk_total) * 1000 / dwall_ms;
+                c->disk_bps = bps > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)bps;
+            }
+            if (c->etw_net_total >= pp->etw_net_total) {
+                uint64_t bps = (c->etw_net_total - pp->etw_net_total) * 1000 / dwall_ms;
+                c->net_bps = bps > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)bps;
+            }
             break;
         }
     }
@@ -134,7 +152,7 @@ static void take_sample(void)
     snapshot_t *snap = snapshot_build(dest, g_scratch);
     if (!snap) return;
 
-    fill_cpu_pct(snap, g_prev_for_cpu);
+    fill_deltas(snap, g_prev_for_cpu);
     g_prev_for_cpu = snap;
 
     /* roll cpu samples into per-pid history for sparklines */

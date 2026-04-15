@@ -44,15 +44,17 @@ struct Col {
     bool           right_align;
 };
 
-enum { COL_PID, COL_CPU, COL_MEM, COL_THR, COL_HND, COL_NAME, COL_COUNT };
+enum { COL_PID, COL_CPU, COL_MEM, COL_DISK, COL_NET, COL_THR, COL_HND, COL_NAME, COL_COUNT };
 
 static const Col g_cols[COL_COUNT] = {
-    { L"PID",   70,  true  },
-    { L"CPU%",  140, true  },     /* widened to fit inline sparkline */
-    { L"MEM",   90,  true  },
-    { L"THR",   50,  true  },
-    { L"HND",   60,  true  },
-    { L"IMAGE", -1,  false },
+    { L"PID",    70,  true  },
+    { L"CPU%",   140, true  },    /* widened to fit inline sparkline */
+    { L"MEM",    90,  true  },
+    { L"DISK/s", 80,  true  },
+    { L"NET/s",  80,  true  },
+    { L"THR",    50,  true  },
+    { L"HND",    60,  true  },
+    { L"IMAGE",  -1,  false },
 };
 
 static const float COL_PAD = 12.0f;
@@ -327,12 +329,14 @@ extern "C" void render_toggle_sort(int col)
 static int cmp_proc(const process_t *a, const process_t *b, int col)
 {
     switch (col) {
-    case COL_PID: return (a->pid < b->pid) ? -1 : (a->pid > b->pid ? 1 : 0);
-    case COL_CPU: return (int)a->cpu_pct - (int)b->cpu_pct;
-    case COL_MEM: return (a->working_set < b->working_set) ? -1 :
-                         (a->working_set > b->working_set ? 1 : 0);
-    case COL_THR: return (int)a->thread_count - (int)b->thread_count;
-    case COL_HND: return (int)a->handle_count - (int)b->handle_count;
+    case COL_PID:  return (a->pid < b->pid) ? -1 : (a->pid > b->pid ? 1 : 0);
+    case COL_CPU:  return (int)a->cpu_pct - (int)b->cpu_pct;
+    case COL_MEM:  return (a->working_set < b->working_set) ? -1 :
+                          (a->working_set > b->working_set ? 1 : 0);
+    case COL_DISK: return (int)(a->disk_bps - b->disk_bps);
+    case COL_NET:  return (int)(a->net_bps  - b->net_bps);
+    case COL_THR:  return (int)a->thread_count - (int)b->thread_count;
+    case COL_HND:  return (int)a->handle_count - (int)b->handle_count;
     case COL_NAME: {
         const wchar_t *na = intern_get(a->image_name);
         const wchar_t *nb = intern_get(b->image_name);
@@ -531,6 +535,15 @@ extern "C" void render_frame(const snapshot_t *snap)
 
         len = fmt_mem(buf, p->working_set);
         draw_cell(g_fmt_data, buf, len, xs[COL_MEM], ws[COL_MEM], y, row_h, true);
+
+        if (p->disk_bps > 0) {
+            len = fmt_mem(buf, p->disk_bps);
+            draw_cell(g_fmt_data, buf, len, xs[COL_DISK], ws[COL_DISK], y, row_h, true);
+        }
+        if (p->net_bps > 0) {
+            len = fmt_mem(buf, p->net_bps);
+            draw_cell(g_fmt_data, buf, len, xs[COL_NET], ws[COL_NET], y, row_h, true);
+        }
 
         len = fmt_uint(buf, p->thread_count);
         draw_cell(g_fmt_data, buf, len, xs[COL_THR], ws[COL_THR], y, row_h, true);

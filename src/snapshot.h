@@ -27,6 +27,10 @@ typedef struct {
     uint16_t cpu_pct;         /* fixed point, value/10 = percent (235 = 23.5%) */
     uint16_t _pad2;
     uint32_t _pad3;
+    uint64_t etw_disk_total;  /* cumulative bytes, read + write, from ETW DiskIo */
+    uint64_t etw_net_total;   /* cumulative bytes, in + out, from ETW TcpIp */
+    uint32_t disk_bps;        /* bytes/second since last sample */
+    uint32_t net_bps;
 } process_t;
 
 typedef struct {
