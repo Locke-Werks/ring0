@@ -906,7 +906,94 @@ extern "C" void render_frame(const snapshot_t *snap)
 
     /* non-process views */
     if (g_view != VIEW_PROCESSES) {
-        if (g_view == VIEW_CPU && snap) {
+        if (g_view == VIEW_MEMORY && snap) {
+            MEMORYSTATUSEX m;
+            m.dwLength = sizeof m;
+            GlobalMemoryStatusEx(&m);
+
+            const float left_x = 24.0f;
+            float yy = top + 12.0f;
+
+            wchar_t buf2[128];
+            int n2;
+
+            /* physical memory headline */
+            g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+            g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            n2 = wsprintfW(buf2, L"physical:  %I64u MB used / %I64u MB total  (%u%% in use)",
+                (m.ullTotalPhys - m.ullAvailPhys) / (1024 * 1024),
+                m.ullTotalPhys / (1024 * 1024),
+                m.dwMemoryLoad);
+            g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f), g_brush);
+            yy += 28.0f;
+
+            /* big used bar */
+            float bar_w = g_w_dips - left_x * 2.0f;
+            g_brush->SetColor(to_d2d(th->subtle, 0.30f));
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + bar_w, yy + 18.0f), g_brush);
+            g_brush->SetColor(to_d2d(th->accent, 0.65f));
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy,
+                left_x + bar_w * (m.dwMemoryLoad / 100.0f), yy + 18.0f), g_brush);
+            yy += 28.0f;
+
+            /* commit + virtual */
+            g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+            n2 = wsprintfW(buf2, L"commit:    %I64u MB used / %I64u MB total",
+                (m.ullTotalPageFile - m.ullAvailPageFile) / (1024 * 1024),
+                m.ullTotalPageFile / (1024 * 1024));
+            g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f), g_brush);
+            yy += 28.0f;
+
+            /* top mem consumers */
+            yy += 8.0f;
+            g_brush->SetColor(to_d2d(th->foreground, 0.65f));
+            g_rt->DrawText(L"top working set", 15, g_fmt_chrome,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f), g_brush);
+            yy += 24.0f;
+            /* hairline */
+            g_brush->SetColor(to_d2d(th->subtle, 0.5f));
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f), g_brush);
+            yy += 6.0f;
+
+            /* sort by working_set desc — local copy of indices */
+            uint32_t mem_idx[1024];
+            uint32_t mn = snap->n_processes;
+            if (mn > 1024) mn = 1024;
+            for (uint32_t i = 0; i < mn; ++i) mem_idx[i] = i;
+            for (uint32_t i = 1; i < mn; ++i) {
+                uint32_t cur = mem_idx[i];
+                uint32_t j = i;
+                while (j > 0 && snap->processes[mem_idx[j - 1]].working_set
+                                < snap->processes[cur].working_set) {
+                    mem_idx[j] = mem_idx[j - 1];
+                    --j;
+                }
+                mem_idx[j] = cur;
+            }
+
+            uint64_t max_ws = mn > 0 ? snap->processes[mem_idx[0]].working_set : 1;
+            if (max_ws == 0) max_ws = 1;
+
+            for (uint32_t i = 0; i < 30 && i < mn; ++i) {
+                if (yy + 22.0f > g_h_dips - SCRUBBER_H) break;
+                const process_t *pp = &snap->processes[mem_idx[i]];
+                const wchar_t *name = intern_get(pp->image_name);
+                if (!name) name = L"<unknown>";
+                float row_w = bar_w * ((float)pp->working_set / (float)max_ws);
+                /* row bar */
+                g_brush->SetColor(to_d2d(th->accent, 0.30f));
+                g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w, yy + 18.0f), g_brush);
+                /* label */
+                g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+                n2 = wsprintfW(buf2, L"%6u  %5I64uM  %s",
+                    pp->pid, pp->working_set / (1024 * 1024), name);
+                g_rt->DrawText(buf2, n2, g_fmt_data,
+                    D2D1::RectF(left_x + 6.0f, yy, g_w_dips - left_x, yy + 18.0f), g_brush);
+                yy += 20.0f;
+            }
+        } else if (g_view == VIEW_CPU && snap) {
             /* per-core meter grid */
             int cn = snap->cpu_core_count;
             if (cn > 0) {
