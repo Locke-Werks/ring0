@@ -1050,6 +1050,45 @@ extern "C" void render_frame(const snapshot_t *snap)
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f * g_scale), g_brush);
             yy += 36.0f * g_scale;
 
+            /* per-adapter strip (network view only) */
+            if (mode_net && snap->n_ifaces > 0) {
+                g_brush->SetColor(to_d2d(th->foreground, 0.65f));
+                g_rt->DrawText(L"adapters", 8, g_fmt_chrome,
+                    D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+                yy += 28.0f * g_scale;
+                g_brush->SetColor(to_d2d(th->subtle, 0.5f));
+                g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f * g_scale), g_brush);
+                yy += 8.0f * g_scale;
+
+                uint64_t nmax = 1;
+                for (int ni = 0; ni < snap->n_ifaces; ++ni) {
+                    uint64_t v = (uint64_t)snap->ifaces[ni].in_bps + snap->ifaces[ni].out_bps;
+                    if (v > nmax) nmax = v;
+                }
+
+                float bar_w_n = g_w_dips - left_x * 2.0f;
+                float row_h_n = 24.0f * g_scale;
+                for (int ni = 0; ni < snap->n_ifaces; ++ni) {
+                    const net_if_t *ifc = &snap->ifaces[ni];
+                    uint64_t v = (uint64_t)ifc->in_bps + ifc->out_bps;
+                    float row_w = bar_w_n * ((float)v / (float)nmax);
+                    g_brush->SetColor(to_d2d(th->accent, ifc->up ? 0.30f : 0.12f));
+                    g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
+                        yy + row_h_n - 3.0f * g_scale), g_brush);
+                    g_brush->SetColor(to_d2d(th->foreground, ifc->up ? 0.95f : 0.55f));
+                    n2 = wsprintfW(buf2,
+                        L"%-40s  in %5u KiB/s   out %5u KiB/s   %s  %u Mb",
+                        ifc->name, ifc->in_bps / 1024, ifc->out_bps / 1024,
+                        ifc->up ? L"up" : L"--",
+                        (unsigned)(ifc->link_speed / 1000000));
+                    g_rt->DrawText(buf2, n2, g_fmt_data,
+                        D2D1::RectF(left_x + 6.0f * g_scale, yy,
+                                    g_w_dips - left_x, yy + row_h_n), g_brush);
+                    yy += row_h_n;
+                }
+                yy += 12.0f * g_scale;
+            }
+
             /* per-physical-disk strip (disk view only) */
             if (mode_disk && snap->n_disks > 0) {
                 g_brush->SetColor(to_d2d(th->foreground, 0.65f));

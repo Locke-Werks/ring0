@@ -4,6 +4,7 @@
 #include <windows.h>
 #include "arena.h"
 #include "physdisk.h"
+#include "netif.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,8 +54,10 @@ typedef struct {
     uint8_t    _pad2[3];
     uint8_t    cpu_core_pct[64];
     uint8_t    n_disks;
-    uint8_t    _pad3[7];
+    uint8_t    n_ifaces;
+    uint8_t    _pad3[6];
     phys_disk_t disks[PHYS_DISK_MAX];
+    net_if_t   ifaces[NETIF_MAX];
     process_t *processes;     /* flat array in the same arena */
 } snapshot_t;
 
