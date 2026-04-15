@@ -4,6 +4,7 @@
 #include "history.h"
 #include "etw.h"
 #include "gpu.h"
+#include "physdisk.h"
 #include <stdint.h>
 
 /* Snapshot arena pool — sized so the time scrubber can show a full minute
@@ -300,6 +301,7 @@ static void take_sample(void)
 
     fill_deltas(snap, g_prev_for_cpu);
     fill_per_core(snap);
+    snap->n_disks = (uint8_t)physdisk_sample(snap->disks, PHYS_DISK_MAX, snap->timestamp);
     g_prev_for_cpu = snap;
 
     /* roll cpu samples into per-pid history for sparklines */

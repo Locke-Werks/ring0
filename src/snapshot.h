@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "arena.h"
+#include "physdisk.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +52,9 @@ typedef struct {
     uint8_t    cpu_core_count;
     uint8_t    _pad2[3];
     uint8_t    cpu_core_pct[64];
+    uint8_t    n_disks;
+    uint8_t    _pad3[7];
+    phys_disk_t disks[PHYS_DISK_MAX];
     process_t *processes;     /* flat array in the same arena */
 } snapshot_t;
 

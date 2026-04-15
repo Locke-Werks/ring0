@@ -1050,6 +1050,44 @@ extern "C" void render_frame(const snapshot_t *snap)
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f * g_scale), g_brush);
             yy += 36.0f * g_scale;
 
+            /* per-physical-disk strip (disk view only) */
+            if (mode_disk && snap->n_disks > 0) {
+                g_brush->SetColor(to_d2d(th->foreground, 0.65f));
+                g_rt->DrawText(L"physical disks", 14, g_fmt_chrome,
+                    D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+                yy += 28.0f * g_scale;
+                g_brush->SetColor(to_d2d(th->subtle, 0.5f));
+                g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f * g_scale), g_brush);
+                yy += 8.0f * g_scale;
+
+                /* find max across all disks for bar scaling */
+                uint64_t dmax = 1;
+                for (int di = 0; di < snap->n_disks; ++di) {
+                    uint64_t v = (uint64_t)snap->disks[di].read_bps + snap->disks[di].write_bps;
+                    if (v > dmax) dmax = v;
+                }
+
+                float bar_w_d = g_w_dips - left_x * 2.0f;
+                float row_h_d = 24.0f * g_scale;
+                for (int di = 0; di < snap->n_disks; ++di) {
+                    const phys_disk_t *d = &snap->disks[di];
+                    uint64_t v = (uint64_t)d->read_bps + d->write_bps;
+                    float row_w = bar_w_d * ((float)v / (float)dmax);
+                    g_brush->SetColor(to_d2d(th->accent, 0.30f));
+                    g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
+                        yy + row_h_d - 3.0f * g_scale), g_brush);
+                    g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+                    n2 = wsprintfW(buf2,
+                        L"%-14s  r %5u KiB/s   w %5u KiB/s   q %u",
+                        d->name, d->read_bps / 1024, d->write_bps / 1024, d->queue_depth);
+                    g_rt->DrawText(buf2, n2, g_fmt_data,
+                        D2D1::RectF(left_x + 6.0f * g_scale, yy,
+                                    g_w_dips - left_x, yy + row_h_d), g_brush);
+                    yy += row_h_d;
+                }
+                yy += 12.0f * g_scale;
+            }
+
             /* sort top consumers */
             uint32_t idx[1024];
             uint32_t mn = snap->n_processes;
