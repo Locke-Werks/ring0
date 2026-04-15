@@ -12,10 +12,12 @@ static arena_t          *g_scratch;
 static arena_t          *g_pool[POOL_N];
 static unsigned          g_next;            /* next pool slot to recycle */
 static volatile snapshot_t *g_current;
+static const snapshot_t *g_prev_for_cpu;    /* used to compute cpu_pct deltas */
 static HANDLE            g_exit_event;
 static HANDLE            g_thread;
 static HWND              g_notify;
 static unsigned          g_period_ms;
+static unsigned          g_num_cores;
 
 /* Build a compact process table from NtQuerySystemInformation(SystemProcessInformation).
    The NT call returns a variable-sized blob (typically ~1 MB on a busy box) into
@@ -83,6 +85,9 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
         pr->io_write_bytes= (uint64_t)spi->WriteTransferCount.QuadPart;
         pr->io_other_bytes= (uint64_t)spi->OtherTransferCount.QuadPart;
         pr->create_time   = (uint64_t)spi->CreateTime.QuadPart;
+        pr->cpu_pct       = 0;
+        pr->_pad2         = 0;
+        pr->_pad3         = 0;
 
         if (spi->ImageName.Buffer && spi->ImageName.Length) {
             size_t wlen = spi->ImageName.Length / sizeof(WCHAR);
@@ -98,12 +103,38 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
     return snap;
 }
 
+/* Walk the new and previous process arrays and fill cpu_pct on cur as
+   normalized percent of total cpu (100 == all cores fully busy). O(n*m) is fine
+   at our process counts; we revisit if it ever becomes hot. */
+static void fill_cpu_pct(snapshot_t *cur, const snapshot_t *prev)
+{
+    if (!prev || !g_num_cores) return;
+    uint64_t dwall_ms = cur->timestamp - prev->timestamp;
+    if (dwall_ms == 0) return;
+
+    for (uint32_t i = 0; i < cur->n_processes; ++i) {
+        process_t *c = &cur->processes[i];
+        for (uint32_t j = 0; j < prev->n_processes; ++j) {
+            const process_t *pp = &prev->processes[j];
+            if (pp->pid != c->pid || pp->create_time != c->create_time) continue;
+            if (c->cpu_100ns < pp->cpu_100ns) break;
+            uint64_t dcpu_ms = (c->cpu_100ns - pp->cpu_100ns) / 10000;
+            uint64_t pct_x10 = (dcpu_ms * 1000) / (dwall_ms * g_num_cores);
+            c->cpu_pct = pct_x10 > 65535 ? 65535 : (uint16_t)pct_x10;
+            break;
+        }
+    }
+}
+
 static void take_sample(void)
 {
     arena_t *dest = g_pool[g_next];
     arena_reset(dest);
     snapshot_t *snap = snapshot_build(dest, g_scratch);
     if (!snap) return;
+
+    fill_cpu_pct(snap, g_prev_for_cpu);
+    g_prev_for_cpu = snap;
 
     InterlockedExchangePointer((PVOID *)&g_current, snap);
     g_next = (g_next + 1) % POOL_N;
@@ -130,6 +161,11 @@ void snapshot_start(HWND notify, unsigned period_ms)
     g_notify    = notify;
     g_period_ms = period_ms ? period_ms : 250;
 
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    g_num_cores = si.dwNumberOfProcessors;
+    if (g_num_cores == 0) g_num_cores = 1;
+
     g_scratch = arena_create(8 * 1024 * 1024);
     for (int i = 0; i < POOL_N; ++i) g_pool[i] = arena_create(2 * 1024 * 1024);
 
@@ -153,6 +189,7 @@ void snapshot_stop(void)
     arena_destroy(g_scratch);
     g_scratch = NULL;
     g_current = NULL;
+    g_prev_for_cpu = NULL;
 }
 
 const snapshot_t *snapshot_current(void)

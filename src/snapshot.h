@@ -24,6 +24,9 @@ typedef struct {
     uint64_t io_write_bytes;
     uint64_t io_other_bytes;
     uint64_t create_time;     /* 100ns since 1601 */
+    uint16_t cpu_pct;         /* fixed point, value/10 = percent (235 = 23.5%) */
+    uint16_t _pad2;
+    uint32_t _pad3;
 } process_t;
 
 typedef struct {

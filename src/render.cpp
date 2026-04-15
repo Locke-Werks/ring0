@@ -26,15 +26,15 @@ struct Col {
     bool           right_align;
 };
 
-enum { COL_PID, COL_MEM, COL_THR, COL_HND, COL_CPU_MS, COL_NAME, COL_COUNT };
+enum { COL_PID, COL_CPU, COL_MEM, COL_THR, COL_HND, COL_NAME, COL_COUNT };
 
 static const Col g_cols[COL_COUNT] = {
-    { L"PID",     70, true  },
-    { L"MEM",     90, true  },
-    { L"THR",     50, true  },
-    { L"HND",     60, true  },
-    { L"CPU(ms)", 90, true  },
-    { L"IMAGE",   -1, false },
+    { L"PID",   70, true  },
+    { L"CPU%",  70, true  },
+    { L"MEM",   90, true  },
+    { L"THR",   50, true  },
+    { L"HND",   60, true  },
+    { L"IMAGE", -1, false },
 };
 
 static const float COL_PAD = 12.0f;
@@ -203,6 +203,11 @@ extern "C" void render_frame(const snapshot_t *snap)
         len = fmt_uint(buf, p->pid);
         draw_cell(g_fmt_data, buf, len, xs[COL_PID], ws[COL_PID], y, row_h, true);
 
+        unsigned pct_int = p->cpu_pct / 10;
+        unsigned pct_dec = p->cpu_pct % 10;
+        len = wsprintfW(buf, L"%u.%u", pct_int, pct_dec);
+        draw_cell(g_fmt_data, buf, len, xs[COL_CPU], ws[COL_CPU], y, row_h, true);
+
         len = fmt_mem(buf, p->working_set);
         draw_cell(g_fmt_data, buf, len, xs[COL_MEM], ws[COL_MEM], y, row_h, true);
 
@@ -211,9 +216,6 @@ extern "C" void render_frame(const snapshot_t *snap)
 
         len = fmt_uint(buf, p->handle_count);
         draw_cell(g_fmt_data, buf, len, xs[COL_HND], ws[COL_HND], y, row_h, true);
-
-        len = wsprintfW(buf, L"%u", (unsigned)(p->cpu_100ns / 10000));
-        draw_cell(g_fmt_data, buf, len, xs[COL_CPU_MS], ws[COL_CPU_MS], y, row_h, true);
 
         const wchar_t *name = intern_get(p->image_name);
         if (!name) name = L"<unknown>";
