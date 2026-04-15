@@ -4,6 +4,10 @@
 #include <windows.h>
 #include "arena.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t pid;
     uint32_t ppid;
@@ -37,3 +41,7 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch);
 void              snapshot_start(HWND notify, unsigned period_ms);
 void              snapshot_stop(void);
 const snapshot_t *snapshot_current(void);   /* atomic load, may be NULL early */
+
+#ifdef __cplusplus
+}
+#endif

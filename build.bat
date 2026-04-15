@@ -25,7 +25,7 @@ if /I "%MODE%"=="debug"   set CL_MODE=/Zi /DDEBUG /Fdbuild\ring0.pdb
 if /I "%MODE%"=="release" set CL_MODE=/DNDEBUG
 
 set OBJS=
-for %%f in (src\*.c) do (
+for %%f in (src\*.c src\*.cpp) do (
     echo cl %%f
     cl %CL_COMMON% %CL_MODE% %%f /Fobuild\%%~nf.obj
     if errorlevel 1 exit /b 1

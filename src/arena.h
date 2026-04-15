@@ -1,6 +1,10 @@
 #pragma once
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct arena arena_t;
 
 arena_t *arena_create(size_t reserve);
@@ -11,4 +15,8 @@ size_t   arena_used(const arena_t *a);
 
 #ifdef DEBUG
 void     arena_selftest(void);
+#endif
+
+#ifdef __cplusplus
+}
 #endif

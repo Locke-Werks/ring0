@@ -1,6 +1,11 @@
 #include <stddef.h>
 #include <string.h>
 
+/* MSVC emits a reference to _fltused from any object that uses float math, to
+   force the CRT's floating-point initializer to link. Without a CRT we just
+   provide the symbol ourselves. */
+int _fltused = 0;
+
 #pragma function(memcpy)
 void *memcpy(void *dst, const void *src, size_t n)
 {

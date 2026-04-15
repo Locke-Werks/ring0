@@ -8,6 +8,7 @@
 #include "ringbuf.h"
 #include "intern.h"
 #include "snapshot.h"
+#include "render.h"
 
 /* dwmapi constants that only exist on recent Windows SDKs. Declared unconditionally
    so the build works on older SDKs; DWM silently rejects them on pre-Win11 22H2. */
@@ -50,14 +51,14 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_ERASEBKGND:
         return 1;
 
+    case WM_SIZE:
+        render_resize(LOWORD(lp), HIWORD(lp));
+        return 0;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        if (!g_mica) {
-            HBRUSH br = CreateSolidBrush(theme_current()->background);
-            FillRect(dc, &ps.rcPaint, br);
-            DeleteObject(br);
-        }
+        BeginPaint(hwnd, &ps);
+        render_frame(snapshot_current());
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -73,6 +74,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY:
         snapshot_stop();
+        render_destroy();
         PostQuitMessage(0);
         return 0;
     }
@@ -103,6 +105,8 @@ static int run(void)
     if (!hwnd) return 1;
 
     apply_dwm(hwnd);
+    render_init(hwnd);
+    render_set_transparent(g_mica);
     snapshot_start(hwnd, 250);
     ShowWindow(hwnd, SW_SHOWDEFAULT);
 
