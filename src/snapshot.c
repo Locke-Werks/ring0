@@ -21,6 +21,88 @@ static HWND              g_notify;
 static unsigned          g_period_ms;
 static unsigned          g_num_cores;
 
+/* Per-pid image-path cache. The exe path is invariant for the life of a PID,
+   so resolving it once via QueryFullProcessImageNameW saves N OpenProcess calls
+   per sample. Key is (pid, create_time) to handle PID reuse. */
+struct path_slot {
+    unsigned pid;
+    uint64_t create_time;
+    uint32_t path;            /* intern handle */
+    uint32_t flags;
+};
+#define PATH_SLOTS 1024
+static struct path_slot *g_paths;        /* VirtualAlloc'd lazily */
+
+static void paths_ensure(void)
+{
+    if (g_paths) return;
+    g_paths = (struct path_slot *)VirtualAlloc(NULL,
+        sizeof(struct path_slot) * PATH_SLOTS,
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+}
+
+static uint32_t resolve_image_path(unsigned pid, uint64_t create_time)
+{
+    if (pid == 0) return 0;
+    paths_ensure();
+    if (!g_paths) return 0;
+    unsigned h = (pid * 2654435761u) & (PATH_SLOTS - 1);
+    struct path_slot *empty = NULL;
+    for (unsigned i = 0; i < PATH_SLOTS; ++i) {
+        struct path_slot *s = &g_paths[(h + i) & (PATH_SLOTS - 1)];
+        if (s->pid == pid && s->create_time == create_time) {
+            return s->path;       /* may be 0 if access denied */
+        }
+        if (s->pid == 0 && !empty) empty = s;
+        if (s->pid == 0) break;
+    }
+    if (!empty) return 0;
+
+    /* attempt the query; cache the outcome either way so we don't retry */
+    HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    uint32_t handle = 0;
+    if (ph) {
+        WCHAR buf[MAX_PATH];
+        DWORD sz = MAX_PATH;
+        if (QueryFullProcessImageNameW(ph, 0, buf, &sz) && sz > 0) {
+            handle = intern_str(buf, sz);
+        }
+        CloseHandle(ph);
+    }
+    empty->pid = pid;
+    empty->create_time = create_time;
+    empty->path = handle;
+    empty->flags = 1;
+    return handle;
+}
+
+static void path_cache_age(const snapshot_t *snap)
+{
+    if (!g_paths) return;
+    /* keep slots only for pids that exist in the latest snapshot */
+    static uint64_t last_age_ms;
+    if (snap->timestamp - last_age_ms < 5000) return;
+    last_age_ms = snap->timestamp;
+
+    for (unsigned i = 0; i < PATH_SLOTS; ++i) {
+        struct path_slot *s = &g_paths[i];
+        if (s->pid == 0) continue;
+        int alive = 0;
+        for (uint32_t j = 0; j < snap->n_processes; ++j) {
+            if (snap->processes[j].pid == s->pid &&
+                snap->processes[j].create_time == s->create_time) {
+                alive = 1;
+                break;
+            }
+        }
+        if (!alive) {
+            s->pid = 0;
+            s->create_time = 0;
+            s->path = 0;
+        }
+    }
+}
+
 /* Build a compact process table from NtQuerySystemInformation(SystemProcessInformation).
    The NT call returns a variable-sized blob (typically ~1 MB on a busy box) into
    `scratch`. We then walk the linked list and emit POD process_t entries into
@@ -97,6 +179,8 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
         pr->etw_net_total  = ec.net_in    + ec.net_out;
         pr->disk_bps       = 0;
         pr->net_bps        = 0;
+        pr->image_path     = resolve_image_path(pr->pid, pr->create_time);
+        pr->_pad4          = 0;
 
         if (spi->ImageName.Buffer && spi->ImageName.Length) {
             size_t wlen = spi->ImageName.Length / sizeof(WCHAR);
@@ -161,6 +245,7 @@ static void take_sample(void)
         history_update(p->pid, p->create_time, p->cpu_pct, snap->timestamp);
     }
     history_age(snap->timestamp, 60000);
+    path_cache_age(snap);
 
     InterlockedExchangePointer((PVOID *)&g_current, snap);
     g_next = (g_next + 1) % POOL_N;

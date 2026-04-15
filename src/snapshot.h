@@ -31,6 +31,8 @@ typedef struct {
     uint64_t etw_net_total;   /* cumulative bytes, in + out, from ETW TcpIp */
     uint32_t disk_bps;        /* bytes/second since last sample */
     uint32_t net_bps;
+    uint32_t image_path;      /* intern handle, full DOS path; 0 if not resolved */
+    uint32_t _pad4;
 } process_t;
 
 typedef struct {
