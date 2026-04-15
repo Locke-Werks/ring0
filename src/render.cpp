@@ -1023,6 +1023,92 @@ extern "C" void render_frame(const snapshot_t *snap)
                     D2D1::RectF(left_x + 6.0f, yy, g_w_dips - left_x, yy + 18.0f), g_brush);
                 yy += 20.0f;
             }
+        } else if ((g_view == VIEW_DISK || g_view == VIEW_NETWORK || g_view == VIEW_GPU) && snap) {
+            const float left_x = 24.0f * g_scale;
+            float yy = top + 12.0f * g_scale;
+            wchar_t buf2[160];
+            int n2;
+
+            const wchar_t *headline = L"";
+            uint64_t total_bps = 0;
+            int      mode_disk = (g_view == VIEW_DISK);
+            int      mode_net  = (g_view == VIEW_NETWORK);
+            int      mode_gpu  = (g_view == VIEW_GPU);
+
+            if (mode_disk) { headline = L"system disk i/o";   total_bps = snap->agg_disk_bps; }
+            if (mode_net)  { headline = L"system network i/o"; total_bps = snap->agg_net_bps; }
+            if (mode_gpu)  { headline = L"gpu activity"; }
+
+            g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+            g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            n2 = wsprintfW(buf2, mode_gpu
+                ? L"%s  (sum %u%% across processes)"
+                : L"%s  %I64u KiB/s aggregate",
+                headline,
+                mode_gpu ? snap->agg_gpu_pct / 10 : total_bps / 1024);
+            g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f * g_scale), g_brush);
+            yy += 36.0f * g_scale;
+
+            /* sort top consumers */
+            uint32_t idx[1024];
+            uint32_t mn = snap->n_processes;
+            if (mn > 1024) mn = 1024;
+            for (uint32_t i = 0; i < mn; ++i) idx[i] = i;
+            #define VAL(p) (mode_disk ? (uint64_t)(p)->disk_bps : \
+                            mode_net  ? (uint64_t)(p)->net_bps  : \
+                                        (uint64_t)(p)->gpu_pct)
+            for (uint32_t i = 1; i < mn; ++i) {
+                uint32_t cur = idx[i];
+                uint32_t j = i;
+                while (j > 0 && VAL(&snap->processes[idx[j-1]]) < VAL(&snap->processes[cur])) {
+                    idx[j] = idx[j-1]; --j;
+                }
+                idx[j] = cur;
+            }
+
+            uint64_t max_v = mn > 0 ? VAL(&snap->processes[idx[0]]) : 1;
+            if (max_v == 0) max_v = 1;
+
+            const wchar_t *col_label =
+                mode_disk ? L"top disk i/o" :
+                mode_net  ? L"top network i/o" :
+                            L"top gpu";
+            g_brush->SetColor(to_d2d(th->foreground, 0.65f));
+            g_rt->DrawText(col_label, lstrlenW(col_label), g_fmt_chrome,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+            yy += 28.0f * g_scale;
+            g_brush->SetColor(to_d2d(th->subtle, 0.5f));
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f * g_scale), g_brush);
+            yy += 8.0f * g_scale;
+
+            float bar_w = g_w_dips - left_x * 2.0f;
+            float row_h_v = 22.0f * g_scale;
+            for (uint32_t i = 0; i < 30 && i < mn; ++i) {
+                if (yy + row_h_v > g_h_dips - SCRUBBER_H) break;
+                const process_t *pp = &snap->processes[idx[i]];
+                uint64_t v = VAL(pp);
+                if (v == 0) break;          /* sorted desc; rest are zero */
+                const wchar_t *name = intern_get(pp->image_name);
+                if (!name) name = L"<unknown>";
+                float row_w = bar_w * ((float)v / (float)max_v);
+                g_brush->SetColor(to_d2d(th->accent, 0.30f));
+                g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
+                    yy + row_h_v - 2.0f * g_scale), g_brush);
+                g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+                if (mode_gpu) {
+                    n2 = wsprintfW(buf2, L"%6u  %u.%u%%  %s",
+                        pp->pid, pp->gpu_pct / 10, pp->gpu_pct % 10, name);
+                } else {
+                    n2 = wsprintfW(buf2, L"%6u  %5I64u KiB/s  %s",
+                        pp->pid, v / 1024, name);
+                }
+                g_rt->DrawText(buf2, n2, g_fmt_data,
+                    D2D1::RectF(left_x + 6.0f * g_scale, yy,
+                                g_w_dips - left_x, yy + row_h_v), g_brush);
+                yy += row_h_v;
+            }
+            #undef VAL
         } else if (g_view == VIEW_FORENSIC) {
             float ix = 0.0f;
             float iy = bar_h + VIEW_TAB_BAR_H;
