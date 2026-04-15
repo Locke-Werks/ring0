@@ -144,24 +144,21 @@ static void draw_scrubber(const theme_t *th, float x, float y, float w, float h)
     }
 }
 
-/* Stack capture state — populated by stack.c (Phase 7 next commit). */
-struct stack_frame {
-    uint64_t addr;
-    uint32_t module_intern;     /* basename */
-    uint32_t symbol_intern;     /* "func+0xN", or empty */
-    uint32_t hits;              /* aggregated count */
-    uint32_t _pad;
-};
+/* Stack capture state — populated by stack.c. */
 #define STACK_FRAMES_MAX 256
-static struct stack_frame g_stack_frames[STACK_FRAMES_MAX];
-static int                g_stack_n;
-static unsigned           g_stack_pid;
-static int                g_stack_capturing;
-static float              g_capture_btn_x, g_capture_btn_y, g_capture_btn_w, g_capture_btn_h;
+static stack_frame_t g_stack_frames[STACK_FRAMES_MAX];
+static int           g_stack_n;
+static unsigned      g_stack_pid;
+static float         g_capture_btn_x, g_capture_btn_y, g_capture_btn_w, g_capture_btn_h;
 
-/* commit 41 will fill these in */
-extern "C" int  stack_capture(unsigned pid);
-extern "C" void stack_clear(void);
+extern "C" void render_set_stack_frames(const stack_frame_t *frames, int n, unsigned pid)
+{
+    if (n < 0) n = 0;
+    if (n > STACK_FRAMES_MAX) n = STACK_FRAMES_MAX;
+    for (int i = 0; i < n; ++i) g_stack_frames[i] = frames[i];
+    g_stack_n = n;
+    g_stack_pid = pid;
+}
 
 static void draw_stack_tab(const theme_t *th, float x, float y, float w, float h, unsigned pid)
 {
@@ -208,8 +205,8 @@ static void draw_stack_tab(const theme_t *th, float x, float y, float w, float h
     float ry = list_y;
     for (int i = 0; i < g_stack_n; ++i) {
         if (ry + line_h > y + h) break;
-        const wchar_t *mod = intern_get(g_stack_frames[i].module_intern);
-        const wchar_t *sym = intern_get(g_stack_frames[i].symbol_intern);
+        const wchar_t *mod = intern_get(g_stack_frames[i].module);
+        const wchar_t *sym = intern_get(g_stack_frames[i].symbol);
         int n = wsprintfW(line, L"%4u  %s!%s",
             g_stack_frames[i].hits,
             mod ? mod : L"?",

@@ -63,6 +63,15 @@ int  render_diff_active(void);
 /* Stack tab: capture button hit-test. */
 int  render_hit_capture_btn(int x, int y);
 
+/* Stack frames pushed in by stack.c after a capture. */
+typedef struct {
+    unsigned long long addr;
+    unsigned           module;   /* intern handle, basename */
+    unsigned           symbol;   /* intern handle */
+    unsigned           hits;
+} stack_frame_t;
+void render_set_stack_frames(const stack_frame_t *frames, int n, unsigned pid);
+
 #ifdef __cplusplus
 }
 #endif
