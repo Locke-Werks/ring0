@@ -1,7 +1,11 @@
 #include <windows.h>
 #include <tlhelp32.h>
+#include <iphlpapi.h>
 /* GDI's DrawText macro shadows ID2D1RenderTarget::DrawText. */
 #undef DrawText
+
+/* tiny local byte-swap so we don't pull in winsock2 just for ntohs */
+static inline WORD swap16(WORD v) { return (WORD)((v >> 8) | (v << 8)); }
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
@@ -40,6 +44,7 @@ static float                  g_pill_x[3], g_pill_y, g_pill_w, g_pill_h;
 static int                    g_inspector_open = 1;
 static int                    g_inspector_tab;        /* 0 modules, 1 network */
 static const float            INSPECTOR_W = 360.0f;
+static float                  g_tab_x[2], g_tab_y, g_tab_w, g_tab_h;
 
 /* module-list cache — refreshed only when the selected pid or tab changes so
    we don't pay the toolhelp cost per frame. */
@@ -86,6 +91,79 @@ static const wchar_t *basename(const wchar_t *path)
     const wchar_t *out = path;
     while (*p) { if (*p == L'\\' || *p == L'/') out = p + 1; ++p; }
     return out;
+}
+
+/* TCP connection cache */
+struct tcp_entry {
+    DWORD state;
+    DWORD local_addr;
+    DWORD remote_addr;
+    WORD  local_port;
+    WORD  remote_port;
+};
+#define TCP_MAX 256
+static struct tcp_entry g_tcp[TCP_MAX];
+static int              g_tcp_n;
+static unsigned         g_tcp_pid = 0xFFFFFFFFu;
+static void            *g_tcp_buf;
+static DWORD            g_tcp_buf_sz;
+
+static void refresh_tcp(unsigned pid)
+{
+    g_tcp_n = 0;
+    g_tcp_pid = pid;
+    if (pid == 0xFFFFFFFFu) return;
+
+    DWORD need = g_tcp_buf_sz ? g_tcp_buf_sz : 64 * 1024;
+    DWORD r = ERROR_INSUFFICIENT_BUFFER;
+    for (int tries = 0; tries < 4; ++tries) {
+        if (need > g_tcp_buf_sz) {
+            if (g_tcp_buf) VirtualFree(g_tcp_buf, 0, MEM_RELEASE);
+            g_tcp_buf = VirtualAlloc(NULL, need, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (!g_tcp_buf) { g_tcp_buf_sz = 0; return; }
+            g_tcp_buf_sz = need;
+        }
+        r = GetExtendedTcpTable(g_tcp_buf, &need, TRUE, AF_INET,
+                                TCP_TABLE_OWNER_PID_ALL, 0);
+        if (r != ERROR_INSUFFICIENT_BUFFER) break;
+    }
+    if (r != NO_ERROR) return;
+
+    MIB_TCPTABLE_OWNER_PID *tbl = (MIB_TCPTABLE_OWNER_PID *)g_tcp_buf;
+    for (DWORD i = 0; i < tbl->dwNumEntries && g_tcp_n < TCP_MAX; ++i) {
+        if (tbl->table[i].dwOwningPid != pid) continue;
+        struct tcp_entry *e = &g_tcp[g_tcp_n++];
+        e->state       = tbl->table[i].dwState;
+        e->local_addr  = tbl->table[i].dwLocalAddr;
+        e->local_port  = swap16((WORD)tbl->table[i].dwLocalPort);
+        e->remote_addr = tbl->table[i].dwRemoteAddr;
+        e->remote_port = swap16((WORD)tbl->table[i].dwRemotePort);
+    }
+}
+
+static const wchar_t *tcp_state_name(DWORD s)
+{
+    switch (s) {
+    case 1:  return L"closed";
+    case 2:  return L"listen";
+    case 3:  return L"syn-sent";
+    case 4:  return L"syn-rcvd";
+    case 5:  return L"estab";
+    case 6:  return L"fin-wait1";
+    case 7:  return L"fin-wait2";
+    case 8:  return L"close-wait";
+    case 9:  return L"closing";
+    case 10: return L"last-ack";
+    case 11: return L"time-wait";
+    case 12: return L"delete";
+    default: return L"?";
+    }
+}
+
+static int fmt_ipv4(wchar_t *buf, DWORD addr, WORD port)
+{
+    const unsigned char *b = (const unsigned char *)&addr;
+    return wsprintfW(buf, L"%u.%u.%u.%u:%u", b[0], b[1], b[2], b[3], port);
 }
 
 /* Column descriptor — width <= 0 means "take the rest." */
@@ -245,6 +323,16 @@ extern "C" void render_set_scope(int scope)
 extern "C" void render_toggle_inspector(void) { g_inspector_open = !g_inspector_open; }
 extern "C" void render_set_inspector_tab(int t) { if (t >= 0 && t < 2) g_inspector_tab = t; }
 extern "C" int  render_inspector_visible(void) { return g_inspector_open; }
+
+extern "C" int render_hit_tab(int x, int y)
+{
+    if (!g_inspector_open) return -1;
+    if ((float)y < g_tab_y || (float)y >= g_tab_y + g_tab_h) return -1;
+    for (int i = 0; i < 2; ++i) {
+        if ((float)x >= g_tab_x[i] && (float)x < g_tab_x[i] + g_tab_w) return i;
+    }
+    return -1;
+}
 
 extern "C" int render_hit_pill(int x, int y)
 {
@@ -659,17 +747,20 @@ extern "C" void render_frame(const snapshot_t *snap)
         /* tab strip */
         static const wchar_t *tabs[] = { L"modules", L"network" };
         float tab_x = ix + 16.0f;
-        float tab_y = iy + 42.0f;
+        g_tab_y = iy + 42.0f;
+        g_tab_w = 80.0f;
+        g_tab_h = 24.0f;
         for (int t = 0; t < 2; ++t) {
+            g_tab_x[t] = tab_x;
             int is_active = (t == g_inspector_tab);
             g_brush->SetColor(to_d2d(
                 is_active ? th->accent : th->foreground,
                 is_active ? 1.0f : 0.55f));
-            D2D1_RECT_F tr = D2D1::RectF(tab_x, tab_y, tab_x + 80.0f, tab_y + 20.0f);
+            D2D1_RECT_F tr = D2D1::RectF(tab_x, g_tab_y, tab_x + g_tab_w, g_tab_y + 20.0f);
             g_rt->DrawText(tabs[t], lstrlenW(tabs[t]), g_fmt_chrome, tr, g_brush);
             if (is_active) {
-                D2D1_RECT_F under = D2D1::RectF(tab_x, tab_y + 20.0f,
-                                                tab_x + 60.0f, tab_y + 22.0f);
+                D2D1_RECT_F under = D2D1::RectF(tab_x, g_tab_y + 20.0f,
+                                                tab_x + 60.0f, g_tab_y + 22.0f);
                 g_rt->FillRectangle(under, g_brush);
             }
             tab_x += 90.0f;
@@ -719,10 +810,38 @@ extern "C" void render_frame(const snapshot_t *snap)
                 }
             }
         } else {
-            g_brush->SetColor(to_d2d(th->foreground, 0.45f));
-            D2D1_RECT_F body = D2D1::RectF(body_x, body_y,
-                                           body_x + body_w, iy + ih - 16.0f);
-            g_rt->DrawText(L"\u2014 empty \u2014", 9, g_fmt_chrome, body, g_brush);
+            /* network tab */
+            if (sel_pid == 0) {
+                g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+                D2D1_RECT_F r = D2D1::RectF(body_x, body_y, body_x + body_w, body_y + 20.0f);
+                g_rt->DrawText(L"select a process to see its connections",
+                    38, g_fmt_chrome, r, g_brush);
+            } else {
+                if (sel_pid != g_tcp_pid) refresh_tcp(sel_pid);
+                if (g_tcp_n == 0) {
+                    g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+                    D2D1_RECT_F r = D2D1::RectF(body_x, body_y, body_x + body_w, body_y + 20.0f);
+                    g_rt->DrawText(L"no tcp connections", 18, g_fmt_chrome, r, g_brush);
+                } else {
+                    float line_h = 16.0f;
+                    g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+                    g_fmt_data->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    float ry = body_y;
+                    wchar_t line[256];
+                    for (int t = 0; t < g_tcp_n; ++t) {
+                        if (ry + line_h > iy + ih - 8.0f) break;
+                        wchar_t la[32], ra[32];
+                        fmt_ipv4(la, g_tcp[t].local_addr,  g_tcp[t].local_port);
+                        fmt_ipv4(ra, g_tcp[t].remote_addr, g_tcp[t].remote_port);
+                        int ln = wsprintfW(line, L"%s  %s \u2192 %s",
+                            tcp_state_name(g_tcp[t].state), la, ra);
+                        D2D1_RECT_F r = D2D1::RectF(body_x, ry,
+                            body_x + body_w, ry + line_h);
+                        g_rt->DrawText(line, (UINT32)ln, g_fmt_data, r, g_brush);
+                        ry += line_h;
+                    }
+                }
+            }
         }
     }
 

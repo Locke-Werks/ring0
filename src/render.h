@@ -46,6 +46,7 @@ int  render_hit_pill(int x, int y);   /* -1 if not on a pill */
 void render_toggle_inspector(void);
 void render_set_inspector_tab(int tab);   /* 0 modules, 1 network */
 int  render_inspector_visible(void);
+int  render_hit_tab(int x, int y);        /* -1 if not on an inspector tab */
 
 #ifdef __cplusplus
 }

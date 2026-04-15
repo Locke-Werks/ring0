@@ -146,6 +146,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
+        int tab = render_hit_tab(x, y);
+        if (tab >= 0) {
+            render_set_inspector_tab(tab);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         int htop = 0, hh = 0;
         render_get_header_layout(&htop, &hh);
