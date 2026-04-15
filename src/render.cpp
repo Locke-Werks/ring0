@@ -392,12 +392,14 @@ extern "C" void render_frame(const snapshot_t *snap)
     uint32_t start = (uint32_t)g_scroll_rows;
 
     /* visibility pass (filter) + sort */
+    filter_query_t q;
+    filter_parse(g_filter_len > 0 ? g_filter_text : L"", &q);
+
     uint32_t n = 0;
     for (uint32_t i = 0; i < snap->n_processes && n < 1024; ++i) {
-        if (g_filter_len > 0) {
-            const wchar_t *name = intern_get(snap->processes[i].image_name);
-            if (filter_score(g_filter_text, name) <= 0) continue;
-        }
+        const process_t *pp = &snap->processes[i];
+        const wchar_t *name = intern_get(pp->image_name);
+        if (!filter_query_match(&q, pp->pid, pp->session_id, name)) continue;
         g_sort_idx[n++] = i;
     }
     if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
