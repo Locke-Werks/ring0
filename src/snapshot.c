@@ -206,6 +206,11 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
    if it ever becomes hot. */
 static void fill_deltas(snapshot_t *cur, const snapshot_t *prev)
 {
+    cur->agg_cpu_pct = 0;
+    cur->agg_gpu_pct = 0;
+    cur->agg_disk_bps = 0;
+    cur->agg_net_bps = 0;
+
     if (!prev || !g_num_cores) return;
     uint64_t dwall_ms = cur->timestamp - prev->timestamp;
     if (dwall_ms == 0) return;
@@ -236,6 +241,15 @@ static void fill_deltas(snapshot_t *cur, const snapshot_t *prev)
             }
             break;
         }
+    }
+
+    /* roll-up totals for the scrubber strip */
+    for (uint32_t i = 0; i < cur->n_processes; ++i) {
+        const process_t *c = &cur->processes[i];
+        cur->agg_cpu_pct  += c->cpu_pct;
+        cur->agg_gpu_pct  += c->gpu_pct;
+        cur->agg_disk_bps += c->disk_bps;
+        cur->agg_net_bps  += c->net_bps;
     }
 }
 

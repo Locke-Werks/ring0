@@ -41,6 +41,11 @@ typedef struct {
     uint64_t   timestamp;     /* GetTickCount64 at sample */
     uint32_t   n_processes;
     uint32_t   _pad;
+    /* aggregate roll-ups for the time scrubber strip — sum across processes */
+    uint32_t   agg_cpu_pct;   /* fixed point, value/10 = percent */
+    uint32_t   agg_gpu_pct;
+    uint64_t   agg_disk_bps;
+    uint64_t   agg_net_bps;
     process_t *processes;     /* flat array in the same arena */
 } snapshot_t;
 
