@@ -94,6 +94,52 @@ static const wchar_t *basename(const wchar_t *path)
     return out;
 }
 
+static D2D1_COLOR_F to_d2d(COLORREF c, float a);   /* fwd decl */
+
+/* Bottom strip showing aggregate cpu/disk/net over the snapshot ring. */
+static const float SCRUBBER_H = 56.0f;
+
+static void draw_scrubber(const theme_t *th, float x, float y, float w, float h)
+{
+    /* backdrop */
+    g_brush->SetColor(to_d2d(th->subtle, 0.22f));
+    g_rt->FillRectangle(D2D1::RectF(x, y, x + w, y + h), g_brush);
+    /* top hairline */
+    g_brush->SetColor(to_d2d(th->subtle, 0.6f));
+    g_rt->FillRectangle(D2D1::RectF(x, y, x + w, y + 1.0f), g_brush);
+
+    int n = snapshot_count();
+    if (n < 2) return;
+
+    float chart_y = y + 6.0f;
+    float chart_h = h - 12.0f;
+    /* always reserve a 240-sample width so older samples sit on the left
+       and the playhead lives at the right edge */
+    float col_w = w / 240.0f;
+
+    /* find max for normalization across the visible window */
+    uint32_t max_cpu = 1;       /* avoid div-by-zero; min 0.1% */
+    for (int i = 0; i < n; ++i) {
+        const snapshot_t *s = snapshot_at(i);
+        if (s && s->agg_cpu_pct > max_cpu) max_cpu = s->agg_cpu_pct;
+    }
+    if (max_cpu < 1000) max_cpu = 1000;   /* ceiling at 100% so quiet systems
+                                             don't look maxed out */
+
+    g_brush->SetColor(to_d2d(th->accent, 0.45f));
+    for (int i = 0; i < n; ++i) {
+        const snapshot_t *s = snapshot_at((n - 1) - i);   /* oldest first */
+        if (!s) continue;
+        float pct = (float)s->agg_cpu_pct / (float)max_cpu;
+        if (pct > 1.0f) pct = 1.0f;
+        float bx = x + (float)(240 - n + i) * col_w;
+        float bh = pct * chart_h;
+        D2D1_RECT_F r = D2D1::RectF(bx, chart_y + chart_h - bh,
+                                    bx + col_w, chart_y + chart_h);
+        g_rt->FillRectangle(r, g_brush);
+    }
+}
+
 /* TCP connection cache */
 struct tcp_entry {
     DWORD state;
@@ -193,6 +239,7 @@ static const float COL_PAD = 12.0f;
 static const float COL_GAP = 16.0f;
 
 static void update_dips(void);
+static D2D1_COLOR_F to_d2d(COLORREF c, float a);
 
 static D2D1_COLOR_F to_d2d(COLORREF c, float a)
 {
@@ -608,11 +655,12 @@ extern "C" void render_frame(const snapshot_t *snap)
 
     if (!snap) { g_rt->EndDraw(); return; }
 
-    /* data rows in cascadia */
+    /* data rows in cascadia. leave room for the scrubber strip at the bottom. */
+    float scrubber_top = g_h_dips - SCRUBBER_H;
     float y = top + header_h + 4.0f;
     g_data_top_y   = (int)y;
     g_data_row_h   = (int)row_h;
-    g_visible_rows = (int)((g_h_dips - y) / row_h);
+    g_visible_rows = (int)((scrubber_top - y) / row_h);
 
     /* clamp scroll so we never blank the grid past the end */
     int max_scroll = (int)snap->n_processes - g_visible_rows;
@@ -636,7 +684,7 @@ extern "C" void render_frame(const snapshot_t *snap)
     if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
 
     for (uint32_t i = start; i < n; ++i) {
-        if (y + row_h > g_h_dips) break;
+        if (y + row_h > scrubber_top) break;
         const process_t *p = &snap->processes[g_sort_idx[i]];
         int len;
 
@@ -748,7 +796,7 @@ extern "C" void render_frame(const snapshot_t *snap)
         float ix = grid_w;
         float iy = bar_h;
         float iw = INSPECTOR_W;
-        float ih = g_h_dips - iy;
+        float ih = (g_h_dips - SCRUBBER_H) - iy;
 
         g_brush->SetColor(to_d2d(th->subtle, 0.22f));
         g_rt->FillRectangle(D2D1::RectF(ix, iy, ix + iw, iy + ih), g_brush);
@@ -881,6 +929,9 @@ extern "C" void render_frame(const snapshot_t *snap)
             }
         }
     }
+
+    /* scrubber strip spans full window width at the bottom */
+    draw_scrubber(th, 0.0f, g_h_dips - SCRUBBER_H, g_w_dips, SCRUBBER_H);
 
     HRESULT hr = g_rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
