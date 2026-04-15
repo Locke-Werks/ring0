@@ -134,12 +134,17 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_LBUTTONDOWN: {
-        /* WM_LBUTTONDOWN gives client coords in physical pixels under PMv2,
-           but render's layout coords are DIPs — convert before comparing. */
-        UINT dpi = GetDpiForWindow(hwnd);
-        if (dpi == 0) dpi = 96;
-        int x = MulDiv((short)LOWORD(lp), 96, (int)dpi);
-        int y = MulDiv((short)HIWORD(lp), 96, (int)dpi);
+        /* render is pinned to 96 DPI so its coord system == physical pixels.
+           WM_LBUTTONDOWN already carries physical client coords, no conversion. */
+        int x = (short)LOWORD(lp);
+        int y = (short)HIWORD(lp);
+
+        int pill = render_hit_pill(x, y);
+        if (pill >= 0) {
+            render_set_scope(pill);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         int htop = 0, hh = 0;
         render_get_header_layout(&htop, &hh);

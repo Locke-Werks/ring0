@@ -18,7 +18,8 @@ static IDWriteTextFormat     *g_fmt_data   = nullptr;   /* cascadia mono, tabula
 static IDWriteTextFormat     *g_fmt_chrome = nullptr;   /* segoe ui variable, header/chrome */
 static ID2D1SolidColorBrush  *g_brush      = nullptr;   /* recolored per draw */
 static HWND                   g_hwnd       = nullptr;
-static unsigned               g_w, g_h;
+static unsigned               g_w, g_h;           /* physical pixels (surface) */
+static float                  g_w_dips, g_h_dips; /* layout in DIPs */
 static BOOL                   g_transparent;
 static unsigned               g_selected_pid = 0xFFFFFFFFu;
 static int                    g_data_top_y, g_data_row_h;
@@ -33,6 +34,8 @@ static int                    g_density = 1;                 /* 0 compact, 1 nor
 static wchar_t                g_filter_text[256];
 static int                    g_filter_len;
 static int                    g_filter_caret;
+static int                    g_scope;                /* 0 all, 1 user, 2 system */
+static float                  g_pill_x[3], g_pill_y, g_pill_w, g_pill_h;
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -54,6 +57,8 @@ static const Col g_cols[COL_COUNT] = {
 
 static const float COL_PAD = 12.0f;
 static const float COL_GAP = 16.0f;
+
+static void update_dips(void);
 
 static D2D1_COLOR_F to_d2d(COLORREF c, float a)
 {
@@ -93,10 +98,15 @@ static void create_target()
         g_w = (unsigned)(rc.right  - rc.left);
         g_h = (unsigned)(rc.bottom - rc.top);
     }
+    update_dips();
 
     auto props = D2D1::RenderTargetProperties();
     props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                           D2D1_ALPHA_MODE_PREMULTIPLIED);
+    /* pin DPI to 96 so our DIP coords are the same as physical pixels. we
+       handle dpi-aware font sizing and layout ourselves via update_dips. */
+    props.dpiX = 96.0f;
+    props.dpiY = 96.0f;
     auto hp = D2D1::HwndRenderTargetProperties(g_hwnd,
         D2D1::SizeU(g_w ? g_w : 1, g_h ? g_h : 1),
         D2D1_PRESENT_OPTIONS_NONE);
@@ -173,6 +183,21 @@ extern "C" void render_cycle_density(int delta)
     if (g_density > 2) g_density = 2;
 }
 
+extern "C" void render_set_scope(int scope)
+{
+    if (scope < 0 || scope > 2) return;
+    g_scope = scope;
+}
+
+extern "C" int render_hit_pill(int x, int y)
+{
+    if ((float)y < g_pill_y || (float)y >= g_pill_y + g_pill_h) return -1;
+    for (int i = 0; i < 3; ++i) {
+        if ((float)x >= g_pill_x[i] && (float)x < g_pill_x[i] + g_pill_w) return i;
+    }
+    return -1;
+}
+
 extern "C" void render_set_filter(const wchar_t *text, int caret)
 {
     g_filter_len = 0;
@@ -188,6 +213,30 @@ extern "C" void render_set_filter(const wchar_t *text, int caret)
     g_filter_caret = caret;
 }
 
+static void draw_pill(const theme_t *th, float x, float y, float w, float h,
+                      const wchar_t *label, int is_active)
+{
+    D2D1_ROUNDED_RECT rr;
+    rr.rect    = D2D1::RectF(x, y, x + w, y + h);
+    rr.radiusX = h * 0.5f;
+    rr.radiusY = h * 0.5f;
+
+    if (is_active) {
+        g_brush->SetColor(to_d2d(th->accent, 0.85f));
+        g_rt->FillRoundedRectangle(rr, g_brush);
+        g_brush->SetColor(to_d2d(th->foreground, 1.0f));
+    } else {
+        g_brush->SetColor(to_d2d(th->foreground, 0.20f));
+        g_rt->FillRoundedRectangle(rr, g_brush);
+        g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+        g_rt->DrawRoundedRectangle(rr, g_brush, 1.2f);
+    }
+    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    D2D1_RECT_F tr = rr.rect;
+    tr.top += 2.0f;
+    g_rt->DrawText(label, lstrlenW(label), g_fmt_chrome, tr, g_brush);
+}
+
 static void draw_command_bar(const theme_t *th, float width, float height)
 {
     /* subtle backdrop */
@@ -195,9 +244,25 @@ static void draw_command_bar(const theme_t *th, float width, float height)
     D2D1_RECT_F bg = D2D1::RectF(0, 0, width, height);
     g_rt->FillRectangle(bg, g_brush);
 
+    /* pills on the right */
+    const float pill_w    = 66.0f;
+    const float pill_h    = 26.0f;
+    const float pill_gap  = 6.0f;
+    const float pill_pad  = 14.0f;
+    g_pill_y = (height - pill_h) * 0.5f;
+    g_pill_w = pill_w;
+    g_pill_h = pill_h;
+    for (int i = 0; i < 3; ++i)
+        g_pill_x[i] = width - pill_pad - (3 - i) * pill_w - (2 - i) * pill_gap;
+
+    static const wchar_t *labels[3] = { L"all", L"user", L"system" };
+    for (int i = 0; i < 3; ++i)
+        draw_pill(th, g_pill_x[i], g_pill_y, pill_w, pill_h, labels[i], i == g_scope);
+
+
     const float input_x = 14.0f;
     const float input_y = 10.0f;
-    const float input_w = width - 28.0f;
+    const float input_w = g_pill_x[0] - pill_gap - input_x;
     const float input_h = height - 20.0f;
 
     /* rounded rect input */
@@ -299,9 +364,17 @@ static void sort_indices(uint32_t *idx, int n, const process_t *procs)
     }
 }
 
+static void update_dips(void)
+{
+    /* render target is pinned to 96 DPI so "DIP" == physical pixel. */
+    g_w_dips = (float)g_w;
+    g_h_dips = (float)g_h;
+}
+
 extern "C" void render_resize(unsigned w, unsigned h)
 {
     g_w = w; g_h = h;
+    update_dips();
     if (g_rt) {
         D2D1_SIZE_U sz = D2D1::SizeU(w, h);
         g_rt->Resize(sz);
@@ -344,7 +417,7 @@ extern "C" void render_frame(const snapshot_t *snap)
     g_rt->Clear(clear);
 
     float xs[COL_COUNT], ws[COL_COUNT];
-    compute_columns((float)g_w, xs, ws);
+    compute_columns(g_w_dips, xs, ws);
     for (int i = 0; i < COL_COUNT; ++i) { g_col_xs[i] = xs[i]; g_col_ws[i] = ws[i]; }
 
     static const float density_row[3]    = { 20.0f, 24.0f, 28.0f };
@@ -354,7 +427,7 @@ extern "C" void render_frame(const snapshot_t *snap)
     const float bar_h    = 48.0f;
     const float top      = bar_h + 12.0f;
 
-    draw_command_bar(th, (float)g_w, bar_h);
+    draw_command_bar(th, g_w_dips, bar_h);
 
     g_header_top = (int)top;
     g_header_h   = (int)header_h;
@@ -374,7 +447,7 @@ extern "C" void render_frame(const snapshot_t *snap)
     /* hairline divider under the header */
     g_brush->SetColor(to_d2d(th->subtle, 0.6f));
     D2D1_RECT_F divider = D2D1::RectF(COL_PAD, top + header_h - 1.0f,
-                                      (float)g_w - COL_PAD, top + header_h);
+                                      g_w_dips - COL_PAD, top + header_h);
     g_rt->FillRectangle(divider, g_brush);
 
     if (!snap) { g_rt->EndDraw(); return; }
@@ -383,7 +456,7 @@ extern "C" void render_frame(const snapshot_t *snap)
     float y = top + header_h + 4.0f;
     g_data_top_y   = (int)y;
     g_data_row_h   = (int)row_h;
-    g_visible_rows = (int)(((float)g_h - y) / row_h);
+    g_visible_rows = (int)((g_h_dips - y) / row_h);
 
     /* clamp scroll so we never blank the grid past the end */
     int max_scroll = (int)snap->n_processes - g_visible_rows;
@@ -399,20 +472,22 @@ extern "C" void render_frame(const snapshot_t *snap)
     for (uint32_t i = 0; i < snap->n_processes && n < 1024; ++i) {
         const process_t *pp = &snap->processes[i];
         const wchar_t *name = intern_get(pp->image_name);
+        if (g_scope == 1 && pp->session_id == 0) continue;   /* user only */
+        if (g_scope == 2 && pp->session_id != 0) continue;   /* system only */
         if (!filter_query_match(&q, pp->pid, pp->session_id, name)) continue;
         g_sort_idx[n++] = i;
     }
     if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
 
     for (uint32_t i = start; i < n; ++i) {
-        if (y + row_h > (float)g_h) break;
+        if (y + row_h > g_h_dips) break;
         const process_t *p = &snap->processes[g_sort_idx[i]];
         int len;
 
         if (p->pid == g_selected_pid) {
             /* subtle accent fill across the row */
             g_brush->SetColor(to_d2d(th->accent, 0.10f));
-            D2D1_RECT_F sel = D2D1::RectF(0.0f, y, (float)g_w, y + row_h);
+            D2D1_RECT_F sel = D2D1::RectF(0.0f, y, g_w_dips, y + row_h);
             g_rt->FillRectangle(sel, g_brush);
             /* 2px accent left border */
             g_brush->SetColor(to_d2d(th->accent, 1.0f));

@@ -38,6 +38,10 @@ void render_cycle_density(int delta);
 /* Command bar: filter text. Render makes a copy. caret is character offset. */
 void render_set_filter(const wchar_t *text, int caret);
 
+/* Scope pills. 0 = all, 1 = user (session != 0), 2 = system (session == 0). */
+void render_set_scope(int scope);
+int  render_hit_pill(int x, int y);   /* -1 if not on a pill */
+
 #ifdef __cplusplus
 }
 #endif
