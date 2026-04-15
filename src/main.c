@@ -143,6 +143,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int x = (short)LOWORD(lp);
         int y = (short)HIWORD(lp);
 
+        int view = render_hit_view_tab(x, y);
+        if (view >= 0) {
+            render_set_view(view);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
         int pill = render_hit_pill(x, y);
         if (pill >= 0) {
             render_set_scope(pill);
@@ -240,8 +246,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
-            if (wp >= '1' && wp <= '3') {
-                render_set_inspector_tab((int)(wp - '1'));
+            if (wp >= '1' && wp <= '7') {
+                render_set_view((int)(wp - '1'));
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }

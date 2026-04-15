@@ -70,6 +70,21 @@ void render_toggle_tree(void);
 int  render_tree_mode(void);
 void render_tree_toggle_collapse(unsigned pid);
 
+/* Top-level resource views (Ctrl+1..7). */
+enum {
+    VIEW_PROCESSES = 0,
+    VIEW_CPU       = 1,
+    VIEW_MEMORY    = 2,
+    VIEW_DISK      = 3,
+    VIEW_NETWORK   = 4,
+    VIEW_GPU       = 5,
+    VIEW_FORENSIC  = 6,
+    VIEW_COUNT     = 7,
+};
+void render_set_view(int v);
+int  render_get_view(void);
+int  render_hit_view_tab(int x, int y);   /* -1 if not on a top tab */
+
 /* Stack frames pushed in by stack.c after a capture. */
 typedef struct {
     unsigned long long addr;

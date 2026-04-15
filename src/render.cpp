@@ -51,6 +51,9 @@ static int                    g_paused;
 static float                  g_scrubber_y;
 static int                    g_diff_back = -1;     /* baseline back-index, -1 inactive */
 static int                    g_tree_mode;
+static int                    g_view = VIEW_PROCESSES;
+static float                  g_view_tab_x[VIEW_COUNT], g_view_tab_y, g_view_tab_w, g_view_tab_h;
+static const float            VIEW_TAB_BAR_H = 36.0f;
 /* Per-pid collapse state for tree view. Linear array — typical user collapses
    only a handful of subtrees so a hash isn't worth the complexity. */
 static unsigned               g_collapsed[256];
@@ -75,6 +78,17 @@ extern "C" void render_tree_toggle_collapse(unsigned pid)
 
 extern "C" void render_toggle_tree(void) { g_tree_mode = !g_tree_mode; }
 extern "C" int  render_tree_mode(void)   { return g_tree_mode; }
+
+extern "C" void render_set_view(int v) { if (v >= 0 && v < VIEW_COUNT) g_view = v; }
+extern "C" int  render_get_view(void) { return g_view; }
+extern "C" int  render_hit_view_tab(int x, int y)
+{
+    if ((float)y < g_view_tab_y || (float)y >= g_view_tab_y + g_view_tab_h) return -1;
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+        if ((float)x >= g_view_tab_x[i] && (float)x < g_view_tab_x[i] + g_view_tab_w) return i;
+    }
+    return -1;
+}
 
 /* Tree view buffer — built each frame from the current snapshot. */
 struct tree_node {
@@ -849,9 +863,65 @@ extern "C" void render_frame(const snapshot_t *snap)
     const float row_h    = density_row[g_density];
     const float header_h = density_header[g_density];
     const float bar_h    = 48.0f;
-    const float top      = bar_h + 12.0f;
+    const float top      = bar_h + VIEW_TAB_BAR_H + 12.0f;
 
     draw_command_bar(th, g_w_dips, bar_h);
+
+    /* top-level resource view tabs */
+    {
+        static const wchar_t *names[VIEW_COUNT] = {
+            L"processes", L"cpu", L"memory", L"disk", L"network", L"gpu", L"forensic"
+        };
+        g_view_tab_y = bar_h;
+        g_view_tab_h = VIEW_TAB_BAR_H;
+        g_view_tab_w = 110.0f;
+        float tx = 14.0f;
+
+        /* backdrop */
+        g_brush->SetColor(to_d2d(th->subtle, 0.12f));
+        g_rt->FillRectangle(D2D1::RectF(0, g_view_tab_y, g_w_dips,
+                                        g_view_tab_y + g_view_tab_h), g_brush);
+        /* hairline */
+        g_brush->SetColor(to_d2d(th->subtle, 0.6f));
+        g_rt->FillRectangle(D2D1::RectF(0, g_view_tab_y + g_view_tab_h - 1.0f,
+                                        g_w_dips, g_view_tab_y + g_view_tab_h), g_brush);
+
+        for (int v = 0; v < VIEW_COUNT; ++v) {
+            g_view_tab_x[v] = tx;
+            int active = (v == g_view);
+            g_brush->SetColor(to_d2d(th->foreground, active ? 1.0f : 0.55f));
+            g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            D2D1_RECT_F r = D2D1::RectF(tx, g_view_tab_y + 8.0f,
+                                        tx + g_view_tab_w, g_view_tab_y + g_view_tab_h);
+            g_rt->DrawText(names[v], lstrlenW(names[v]), g_fmt_chrome, r, g_brush);
+            if (active) {
+                g_brush->SetColor(to_d2d(th->accent, 1.0f));
+                g_rt->FillRectangle(D2D1::RectF(tx + 12.0f, g_view_tab_y + g_view_tab_h - 3.0f,
+                                                tx + g_view_tab_w - 12.0f,
+                                                g_view_tab_y + g_view_tab_h - 1.0f), g_brush);
+            }
+            tx += g_view_tab_w;
+        }
+    }
+
+    /* non-process views: placeholder content for now, then bail */
+    if (g_view != VIEW_PROCESSES) {
+        g_brush->SetColor(to_d2d(th->foreground, 0.55f));
+        g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        D2D1_RECT_F r = D2D1::RectF(40.0f, top + 20.0f,
+                                    g_w_dips - 40.0f, top + 60.0f);
+        g_rt->DrawText(L"\u2014 view not yet wired \u2014", 21,
+                       g_fmt_chrome, r, g_brush);
+        /* still draw the scrubber */
+        g_scrubber_y = g_h_dips - SCRUBBER_H;
+        draw_scrubber(th, 0.0f, g_scrubber_y, g_w_dips, SCRUBBER_H);
+        HRESULT hr = g_rt->EndDraw();
+        if (hr == D2DERR_RECREATE_TARGET) {
+            if (g_brush) { g_brush->Release(); g_brush = nullptr; }
+            if (g_rt)    { g_rt->Release();    g_rt    = nullptr; }
+        }
+        return;
+    }
 
     g_header_top = (int)top;
     g_header_h   = (int)header_h;
