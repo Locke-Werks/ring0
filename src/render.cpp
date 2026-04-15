@@ -36,6 +36,9 @@ static int                    g_filter_len;
 static int                    g_filter_caret;
 static int                    g_scope;                /* 0 all, 1 user, 2 system */
 static float                  g_pill_x[3], g_pill_y, g_pill_w, g_pill_h;
+static int                    g_inspector_open = 1;
+static int                    g_inspector_tab;        /* 0 modules, 1 network */
+static const float            INSPECTOR_W = 360.0f;
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -190,6 +193,10 @@ extern "C" void render_set_scope(int scope)
     if (scope < 0 || scope > 2) return;
     g_scope = scope;
 }
+
+extern "C" void render_toggle_inspector(void) { g_inspector_open = !g_inspector_open; }
+extern "C" void render_set_inspector_tab(int t) { if (t >= 0 && t < 2) g_inspector_tab = t; }
+extern "C" int  render_inspector_visible(void) { return g_inspector_open; }
 
 extern "C" int render_hit_pill(int x, int y)
 {
@@ -420,8 +427,12 @@ extern "C" void render_frame(const snapshot_t *snap)
     g_rt->BeginDraw();
     g_rt->Clear(clear);
 
+    float grid_w = g_w_dips;
+    if (g_inspector_open) grid_w -= INSPECTOR_W;
+    if (grid_w < 200.0f)  grid_w = 200.0f;
+
     float xs[COL_COUNT], ws[COL_COUNT];
-    compute_columns(g_w_dips, xs, ws);
+    compute_columns(grid_w, xs, ws);
     for (int i = 0; i < COL_COUNT; ++i) { g_col_xs[i] = xs[i]; g_col_ws[i] = ws[i]; }
 
     static const float density_row[3]    = { 20.0f, 24.0f, 28.0f };
@@ -451,7 +462,7 @@ extern "C" void render_frame(const snapshot_t *snap)
     /* hairline divider under the header */
     g_brush->SetColor(to_d2d(th->subtle, 0.6f));
     D2D1_RECT_F divider = D2D1::RectF(COL_PAD, top + header_h - 1.0f,
-                                      g_w_dips - COL_PAD, top + header_h);
+                                      grid_w - COL_PAD, top + header_h);
     g_rt->FillRectangle(divider, g_brush);
 
     if (!snap) { g_rt->EndDraw(); return; }
@@ -491,7 +502,7 @@ extern "C" void render_frame(const snapshot_t *snap)
         if (p->pid == g_selected_pid) {
             /* subtle accent fill across the row */
             g_brush->SetColor(to_d2d(th->accent, 0.10f));
-            D2D1_RECT_F sel = D2D1::RectF(0.0f, y, g_w_dips, y + row_h);
+            D2D1_RECT_F sel = D2D1::RectF(0.0f, y, grid_w, y + row_h);
             g_rt->FillRectangle(sel, g_brush);
             /* 2px accent left border */
             g_brush->SetColor(to_d2d(th->accent, 1.0f));
@@ -557,6 +568,74 @@ extern "C" void render_frame(const snapshot_t *snap)
                   xs[COL_NAME], ws[COL_NAME], y, row_h, false);
 
         y += row_h;
+    }
+
+    /* inspector panel */
+    if (g_inspector_open) {
+        float ix = grid_w;
+        float iy = bar_h;
+        float iw = INSPECTOR_W;
+        float ih = g_h_dips - iy;
+
+        g_brush->SetColor(to_d2d(th->subtle, 0.22f));
+        g_rt->FillRectangle(D2D1::RectF(ix, iy, ix + iw, iy + ih), g_brush);
+
+        /* left divider */
+        g_brush->SetColor(to_d2d(th->subtle, 0.6f));
+        g_rt->FillRectangle(D2D1::RectF(ix, iy, ix + 1.0f, iy + ih), g_brush);
+
+        /* header */
+        g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+        g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+
+        wchar_t title[256];
+        const wchar_t *sel_name = L"no selection";
+        uint32_t sel_pid = 0;
+        if (g_selected_pid != 0xFFFFFFFFu) {
+            for (uint32_t i = 0; i < snap->n_processes; ++i) {
+                if (snap->processes[i].pid == g_selected_pid) {
+                    sel_pid = g_selected_pid;
+                    const wchar_t *nm = intern_get(snap->processes[i].image_name);
+                    if (nm) sel_name = nm;
+                    break;
+                }
+            }
+        }
+
+        int tlen = sel_pid ? wsprintfW(title, L"%s  pid %u", sel_name, sel_pid)
+                           : wsprintfW(title, L"no selection");
+        D2D1_RECT_F title_r = D2D1::RectF(ix + 16.0f, iy + 12.0f,
+                                          ix + iw - 16.0f, iy + 36.0f);
+        g_rt->DrawText(title, (UINT32)tlen, g_fmt_chrome, title_r, g_brush);
+
+        /* tab strip */
+        static const wchar_t *tabs[] = { L"modules", L"network" };
+        float tab_x = ix + 16.0f;
+        float tab_y = iy + 42.0f;
+        for (int t = 0; t < 2; ++t) {
+            int is_active = (t == g_inspector_tab);
+            g_brush->SetColor(to_d2d(
+                is_active ? th->accent : th->foreground,
+                is_active ? 1.0f : 0.55f));
+            D2D1_RECT_F tr = D2D1::RectF(tab_x, tab_y, tab_x + 80.0f, tab_y + 20.0f);
+            g_rt->DrawText(tabs[t], lstrlenW(tabs[t]), g_fmt_chrome, tr, g_brush);
+            if (is_active) {
+                D2D1_RECT_F under = D2D1::RectF(tab_x, tab_y + 20.0f,
+                                                tab_x + 60.0f, tab_y + 22.0f);
+                g_rt->FillRectangle(under, g_brush);
+            }
+            tab_x += 90.0f;
+        }
+
+        /* divider under tabs */
+        g_brush->SetColor(to_d2d(th->subtle, 0.5f));
+        g_rt->FillRectangle(D2D1::RectF(ix + 16.0f, iy + 68.0f,
+                                        ix + iw - 16.0f, iy + 69.0f), g_brush);
+
+        g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+        D2D1_RECT_F body = D2D1::RectF(ix + 16.0f, iy + 80.0f,
+                                       ix + iw - 16.0f, iy + ih - 16.0f);
+        g_rt->DrawText(L"\u2014 empty \u2014", 9, g_fmt_chrome, body, g_brush);
     }
 
     HRESULT hr = g_rt->EndDraw();

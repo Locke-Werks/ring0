@@ -189,6 +189,16 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
+            if (wp == 'I') {
+                render_toggle_inspector();
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            if (wp >= '1' && wp <= '2') {
+                render_set_inspector_tab((int)(wp - '1'));
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
         }
 
         /* filter caret / deletion */
