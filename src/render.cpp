@@ -200,19 +200,33 @@ static void draw_stack_tab(const theme_t *th, float x, float y, float w, float h
         return;
     }
 
-    g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+    /* hits-proportional bars, sorted descending — gives a flame-graph feel
+       at the leaf-frame granularity. Real call-path nesting is a future
+       refactor that would need full per-stack chains, not the aggregate
+       table. */
+    unsigned max_hits = 1;
+    for (int i = 0; i < g_stack_n; ++i)
+        if (g_stack_frames[i].hits > max_hits) max_hits = g_stack_frames[i].hits;
+
     wchar_t line[512];
     float ry = list_y;
     for (int i = 0; i < g_stack_n; ++i) {
         if (ry + line_h > y + h) break;
         const wchar_t *mod = intern_get(g_stack_frames[i].module);
         const wchar_t *sym = intern_get(g_stack_frames[i].symbol);
-        int n = wsprintfW(line, L"%4u  %s!%s",
+        float bar_w = w * ((float)g_stack_frames[i].hits / (float)max_hits);
+
+        g_brush->SetColor(to_d2d(th->accent, 0.45f));
+        g_rt->FillRectangle(D2D1::RectF(x, ry, x + bar_w, ry + line_h - 2.0f), g_brush);
+
+        g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+        int n = wsprintfW(line, L"%u  %s!%s",
             g_stack_frames[i].hits,
             mod ? mod : L"?",
             sym ? sym : L"?");
-        D2D1_RECT_F r = D2D1::RectF(x, ry, x + w, ry + line_h);
-        g_rt->DrawText(line, (UINT32)n, g_fmt_data, r, g_brush);
+        D2D1_RECT_F tr = D2D1::RectF(x + 6.0f, ry, x + w, ry + line_h);
+        g_rt->DrawText(line, (UINT32)n, g_fmt_data, tr, g_brush);
+
         ry += line_h;
     }
 }
