@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include "theme.h"
 #include "arena.h"
+#include "ringbuf.h"
 
 /* dwmapi constants that only exist on recent Windows SDKs. Declared unconditionally
    so the build works on older SDKs; DWM silently rejects them on pre-Win11 22H2. */
@@ -113,6 +114,7 @@ void WinMainCRTStartup(void)
 {
 #ifdef DEBUG
     arena_selftest();
+    ringbuf_selftest();
 #endif
     ExitProcess((UINT)run());
 }
