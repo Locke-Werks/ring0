@@ -32,7 +32,7 @@ for %%f in (src\*.c) do (
     set OBJS=!OBJS! build\%%~nf.obj
 )
 
-set LINK_COMMON=/SUBSYSTEM:WINDOWS,6.00 /ENTRY:WinMainCRTStartup /NODEFAULTLIB /MERGE:.rdata=.text /MERGE:.pdata=.text /ALIGN:16 /OPT:REF /OPT:ICF=4 /STACK:0x100000,0x100000 /OUT:build\ring0.exe /nologo
+set LINK_COMMON=/SUBSYSTEM:WINDOWS,6.00 /ENTRY:WinMainCRTStartup /NODEFAULTLIB /MERGE:.rdata=.text /MERGE:.pdata=.text /ALIGN:16 /MANIFEST:EMBED /MANIFESTUAC:NO /MANIFESTINPUT:res\ring0.manifest /OPT:REF /OPT:ICF=4 /STACK:0x100000,0x100000 /OUT:build\ring0.exe /nologo
 set LINK_LIBS=kernel32.lib user32.lib gdi32.lib ntdll.lib d2d1.lib dwrite.lib dxgi.lib d3d11.lib dwmapi.lib advapi32.lib wintrust.lib
 if /I "%MODE%"=="debug" set LINK_MODE=/DEBUG /PDB:build\ring0.pdb
 
