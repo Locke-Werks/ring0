@@ -174,11 +174,12 @@ struct Col {
     bool           right_align;
 };
 
-enum { COL_PID, COL_CPU, COL_MEM, COL_DISK, COL_NET, COL_THR, COL_HND, COL_TRUST, COL_NAME, COL_COUNT };
+enum { COL_PID, COL_CPU, COL_GPU, COL_MEM, COL_DISK, COL_NET, COL_THR, COL_HND, COL_TRUST, COL_NAME, COL_COUNT };
 
 static const Col g_cols[COL_COUNT] = {
     { L"PID",    70,  true  },
     { L"CPU%",   140, true  },    /* widened to fit inline sparkline */
+    { L"GPU%",   60,  true  },
     { L"MEM",    90,  true  },
     { L"DISK/s", 80,  true  },
     { L"NET/s",  80,  true  },
@@ -476,6 +477,7 @@ static int cmp_proc(const process_t *a, const process_t *b, int col)
     switch (col) {
     case COL_PID:  return (a->pid < b->pid) ? -1 : (a->pid > b->pid ? 1 : 0);
     case COL_CPU:  return (int)a->cpu_pct - (int)b->cpu_pct;
+    case COL_GPU:  return (int)a->gpu_pct - (int)b->gpu_pct;
     case COL_MEM:  return (a->working_set < b->working_set) ? -1 :
                           (a->working_set > b->working_set ? 1 : 0);
     case COL_DISK: return (int)(a->disk_bps - b->disk_bps);
@@ -682,6 +684,13 @@ extern "C" void render_frame(const snapshot_t *snap)
         unsigned pct_dec = p->cpu_pct % 10;
         len = wsprintfW(buf, L"%u.%u", pct_int, pct_dec);
         draw_cell(g_fmt_data, buf, len, xs[COL_CPU], ws[COL_CPU], y, row_h, true);
+
+        if (p->gpu_pct > 0) {
+            unsigned gi = p->gpu_pct / 10;
+            unsigned gd = p->gpu_pct % 10;
+            len = wsprintfW(buf, L"%u.%u", gi, gd);
+            draw_cell(g_fmt_data, buf, len, xs[COL_GPU], ws[COL_GPU], y, row_h, true);
+        }
 
         len = fmt_mem(buf, p->working_set);
         draw_cell(g_fmt_data, buf, len, xs[COL_MEM], ws[COL_MEM], y, row_h, true);

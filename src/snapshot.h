@@ -32,7 +32,9 @@ typedef struct {
     uint32_t disk_bps;        /* bytes/second since last sample */
     uint32_t net_bps;
     uint32_t image_path;      /* intern handle, full DOS path; 0 if not resolved */
-    uint32_t _pad4;
+    uint16_t gpu_pct;         /* fixed point, value/10 = percent */
+    uint16_t _pad4;
+    uint64_t gpu_runtime_100ns;  /* cumulative across adapters + engines */
 } process_t;
 
 typedef struct {

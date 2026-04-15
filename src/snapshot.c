@@ -3,6 +3,7 @@
 #include "intern.h"
 #include "history.h"
 #include "etw.h"
+#include "gpu.h"
 #include <stdint.h>
 
 /* Snapshot arena pool. Four is enough cushion: the UI frame holds a snapshot
@@ -180,7 +181,9 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
         pr->disk_bps       = 0;
         pr->net_bps        = 0;
         pr->image_path     = resolve_image_path(pr->pid, pr->create_time);
+        pr->gpu_pct        = 0;
         pr->_pad4          = 0;
+        pr->gpu_runtime_100ns = gpu_runtime_100ns(pr->pid);
 
         if (spi->ImageName.Buffer && spi->ImageName.Length) {
             size_t wlen = spi->ImageName.Length / sizeof(WCHAR);
@@ -223,6 +226,11 @@ static void fill_deltas(snapshot_t *cur, const snapshot_t *prev)
             if (c->etw_net_total >= pp->etw_net_total) {
                 uint64_t bps = (c->etw_net_total - pp->etw_net_total) * 1000 / dwall_ms;
                 c->net_bps = bps > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)bps;
+            }
+            if (c->gpu_runtime_100ns >= pp->gpu_runtime_100ns) {
+                uint64_t dgpu_ms = (c->gpu_runtime_100ns - pp->gpu_runtime_100ns) / 10000;
+                uint64_t pct_x10 = (dgpu_ms * 1000) / dwall_ms;
+                c->gpu_pct = pct_x10 > 65535 ? 65535 : (uint16_t)pct_x10;
             }
             break;
         }
@@ -278,6 +286,8 @@ void snapshot_start(HWND notify, unsigned period_ms)
     g_num_cores = si.dwNumberOfProcessors;
     if (g_num_cores == 0) g_num_cores = 1;
 
+    gpu_init();
+
     g_scratch = arena_create(8 * 1024 * 1024);
     for (int i = 0; i < POOL_N; ++i) g_pool[i] = arena_create(2 * 1024 * 1024);
 
@@ -303,6 +313,7 @@ void snapshot_stop(void)
     g_current = NULL;
     g_prev_for_cpu = NULL;
     history_destroy();
+    gpu_destroy();
 }
 
 const snapshot_t *snapshot_current(void)
