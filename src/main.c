@@ -344,8 +344,10 @@ static int run(void)
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int  sw = wa.right - wa.left, sh = wa.bottom - wa.top;
     int  w  = (sw * 4) / 5, h = (sh * 4) / 5;
-    if (w > 1600) w = 1600;
-    if (h > 1000) h = 1000;
+    /* Wider cap so the dpi-scaled chrome (command bar, view tabs, inspector,
+       column header) all fit on a typical high-dpi display. */
+    if (w > 2400) w = 2400;
+    if (h > 1500) h = 1500;
     int  x  = wa.left + (sw - w) / 2;
     int  y  = wa.top  + (sh - h) / 2;
 

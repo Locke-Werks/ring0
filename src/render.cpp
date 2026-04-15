@@ -26,6 +26,8 @@ static ID2D1SolidColorBrush  *g_brush      = nullptr;   /* recolored per draw */
 static HWND                   g_hwnd       = nullptr;
 static unsigned               g_w, g_h;           /* physical pixels (surface) */
 static float                  g_w_dips, g_h_dips; /* layout in DIPs */
+static float                  g_scale = 1.0f;     /* dpi / 96, applied to fonts + layout */
+static UINT                   g_dpi = 96;
 static BOOL                   g_transparent;
 static unsigned               g_selected_pid = 0xFFFFFFFFu;
 static int                    g_data_top_y, g_data_row_h;
@@ -44,7 +46,8 @@ static int                    g_scope;                /* 0 all, 1 user, 2 system
 static float                  g_pill_x[3], g_pill_y, g_pill_w, g_pill_h;
 static int                    g_inspector_open = 1;
 static int                    g_inspector_tab;        /* 0 modules, 1 network, 2 stack */
-static const float            INSPECTOR_W = 360.0f;
+static const float            INSPECTOR_W_BASE = 280.0f;
+#define INSPECTOR_W (INSPECTOR_W_BASE * g_scale)
 static float                  g_tab_x[3], g_tab_y, g_tab_w, g_tab_h;
 static int                    g_view_back;          /* 0 = live */
 static int                    g_paused;
@@ -196,7 +199,8 @@ static void draw_inspector_body(const theme_t *th, float ix, float iy, float iw,
                                 const snapshot_t *snap, int with_backdrop);
 
 /* Bottom strip showing aggregate cpu/disk/net over the snapshot ring. */
-static const float SCRUBBER_H = 56.0f;
+static const float SCRUBBER_H_BASE = 56.0f;
+#define SCRUBBER_H (SCRUBBER_H_BASE * g_scale)
 
 static void draw_scrubber(const theme_t *th, float x, float y, float w, float h)
 {
@@ -418,20 +422,20 @@ struct Col {
 enum { COL_PID, COL_CPU, COL_GPU, COL_MEM, COL_DISK, COL_NET, COL_THR, COL_HND, COL_TRUST, COL_NAME, COL_COUNT };
 
 static const Col g_cols[COL_COUNT] = {
-    { L"PID",    70,  true  },
-    { L"CPU%",   140, true  },    /* widened to fit inline sparkline */
-    { L"GPU%",   60,  true  },
-    { L"MEM",    90,  true  },
-    { L"DISK/s", 80,  true  },
-    { L"NET/s",  80,  true  },
-    { L"THR",    50,  true  },
-    { L"HND",    60,  true  },
-    { L"TRUST",  44,  false },
+    { L"PID",    60,  true  },
+    { L"CPU%",   110, true  },    /* sparkline + numeric */
+    { L"GPU%",   50,  true  },
+    { L"MEM",    70,  true  },
+    { L"DISK/s", 65,  true  },
+    { L"NET/s",  65,  true  },
+    { L"THR",    45,  true  },
+    { L"HND",    50,  true  },
+    { L"TRUST",  36,  false },
     { L"IMAGE",  -1,  false },
 };
 
-static const float COL_PAD = 12.0f;
-static const float COL_GAP = 16.0f;
+static const float COL_PAD = 10.0f;
+static const float COL_GAP = 8.0f;
 
 static void update_dips(void);
 static D2D1_COLOR_F to_d2d(COLORREF c, float a);
@@ -448,20 +452,20 @@ static D2D1_COLOR_F to_d2d(COLORREF c, float a)
 
 static void compute_columns(float client_w, float *xs, float *ws)
 {
+    float pad  = COL_PAD * g_scale;
+    float gap  = COL_GAP * g_scale;
     float used = 0;
-    int   flex = 0;
     for (int i = 0; i < COL_COUNT; ++i) {
-        if (g_cols[i].width > 0) used += g_cols[i].width + COL_GAP;
-        else                     ++flex;
+        if (g_cols[i].width > 0) used += g_cols[i].width * g_scale + gap;
     }
-    float rest = client_w - 2 * COL_PAD - used;
-    if (rest < 100.0f) rest = 100.0f;
+    float rest = client_w - 2 * pad - used;
+    if (rest < 100.0f * g_scale) rest = 100.0f * g_scale;
 
-    float x = COL_PAD;
+    float x = pad;
     for (int i = 0; i < COL_COUNT; ++i) {
         xs[i] = x;
-        ws[i] = g_cols[i].width > 0 ? g_cols[i].width : rest;
-        x += ws[i] + COL_GAP;
+        ws[i] = g_cols[i].width > 0 ? g_cols[i].width * g_scale : rest;
+        x += ws[i] + gap;
     }
 }
 
@@ -504,6 +508,19 @@ static IDWriteTextFormat *make_format(const wchar_t *family, DWRITE_FONT_WEIGHT 
     return f;
 }
 
+static void recreate_text_formats(void)
+{
+    if (g_fmt_data)   { g_fmt_data->Release();   g_fmt_data   = nullptr; }
+    if (g_fmt_chrome) { g_fmt_chrome->Release(); g_fmt_chrome = nullptr; }
+    g_fmt_data = make_format(L"Cascadia Mono", DWRITE_FONT_WEIGHT_NORMAL, 13.0f * g_scale);
+    if (!g_fmt_data) g_fmt_data = make_format(L"Consolas",
+        DWRITE_FONT_WEIGHT_NORMAL, 13.0f * g_scale);
+    g_fmt_chrome = make_format(L"Segoe UI Variable Display",
+        DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0f * g_scale);
+    if (!g_fmt_chrome) g_fmt_chrome = make_format(L"Segoe UI",
+        DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0f * g_scale);
+}
+
 extern "C" void render_init(HWND hwnd)
 {
     g_hwnd = hwnd;
@@ -514,11 +531,11 @@ extern "C" void render_init(HWND hwnd)
                         __uuidof(IDWriteFactory),
                         reinterpret_cast<IUnknown **>(&g_dw));
 
-    g_fmt_data = make_format(L"Cascadia Mono", DWRITE_FONT_WEIGHT_NORMAL, 13.0f);
-    if (!g_fmt_data) g_fmt_data = make_format(L"Consolas", DWRITE_FONT_WEIGHT_NORMAL, 13.0f);
-
-    g_fmt_chrome = make_format(L"Segoe UI Variable Display", DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0f);
-    if (!g_fmt_chrome) g_fmt_chrome = make_format(L"Segoe UI", DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0f);
+    /* probe dpi so the first text-format creation matches the actual display */
+    g_dpi = GetDpiForWindow(hwnd);
+    if (g_dpi == 0) g_dpi = 96;
+    g_scale = (float)g_dpi / 96.0f;
+    recreate_text_formats();
 
     create_target();
 }
@@ -655,11 +672,11 @@ static void draw_pill(const theme_t *th, float x, float y, float w, float h,
         g_brush->SetColor(to_d2d(th->foreground, 0.20f));
         g_rt->FillRoundedRectangle(rr, g_brush);
         g_brush->SetColor(to_d2d(th->foreground, 0.85f));
-        g_rt->DrawRoundedRectangle(rr, g_brush, 1.2f);
+        g_rt->DrawRoundedRectangle(rr, g_brush, 1.2f * g_scale);
     }
     g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     D2D1_RECT_F tr = rr.rect;
-    tr.top += 2.0f;
+    tr.top += 2.0f * g_scale;
     g_rt->DrawText(label, lstrlenW(label), g_fmt_chrome, tr, g_brush);
 }
 
@@ -671,10 +688,10 @@ static void draw_command_bar(const theme_t *th, float width, float height)
     g_rt->FillRectangle(bg, g_brush);
 
     /* pills on the right */
-    const float pill_w    = 66.0f;
-    const float pill_h    = 26.0f;
-    const float pill_gap  = 6.0f;
-    const float pill_pad  = 14.0f;
+    const float pill_w    = 66.0f * g_scale;
+    const float pill_h    = 26.0f * g_scale;
+    const float pill_gap  = 6.0f  * g_scale;
+    const float pill_pad  = 14.0f * g_scale;
     g_pill_y = (height - pill_h) * 0.5f;
     g_pill_w = pill_w;
     g_pill_h = pill_h;
@@ -686,25 +703,25 @@ static void draw_command_bar(const theme_t *th, float width, float height)
         draw_pill(th, g_pill_x[i], g_pill_y, pill_w, pill_h, labels[i], i == g_scope);
 
 
-    const float input_x = 14.0f;
-    const float input_y = 10.0f;
+    const float input_x = 14.0f * g_scale;
+    const float input_y = 10.0f * g_scale;
     const float input_w = g_pill_x[0] - pill_gap - input_x;
-    const float input_h = height - 20.0f;
+    const float input_h = height - 20.0f * g_scale;
 
     /* rounded rect input */
     D2D1_ROUNDED_RECT rr;
     rr.rect    = D2D1::RectF(input_x, input_y, input_x + input_w, input_y + input_h);
-    rr.radiusX = 8.0f;
-    rr.radiusY = 8.0f;
+    rr.radiusX = 8.0f * g_scale;
+    rr.radiusY = 8.0f * g_scale;
     g_brush->SetColor(to_d2d(th->background, 0.45f));
     g_rt->FillRoundedRectangle(rr, g_brush);
 
     /* 1px subtle border */
     g_brush->SetColor(to_d2d(th->subtle, 0.6f));
-    g_rt->DrawRoundedRectangle(rr, g_brush, 1.0f);
+    g_rt->DrawRoundedRectangle(rr, g_brush, 1.0f * g_scale);
 
-    const float text_x = input_x + 14.0f;
-    const float text_w = input_w - 28.0f;
+    const float text_x = input_x + 14.0f * g_scale;
+    const float text_w = input_w - 28.0f * g_scale;
 
     g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     D2D1_RECT_F tr = D2D1::RectF(text_x, input_y, text_x + text_w, input_y + input_h);
@@ -794,11 +811,21 @@ static void sort_indices(uint32_t *idx, int n, const process_t *procs)
     }
 }
 
+static void recreate_text_formats(void);
+
 static void update_dips(void)
 {
     /* render target is pinned to 96 DPI so "DIP" == physical pixel. */
     g_w_dips = (float)g_w;
     g_h_dips = (float)g_h;
+
+    UINT dpi = g_hwnd ? GetDpiForWindow(g_hwnd) : 96;
+    if (dpi == 0) dpi = 96;
+    if (dpi != g_dpi) {
+        g_dpi = dpi;
+        g_scale = (float)dpi / 96.0f;
+        if (g_dw) recreate_text_formats();
+    }
 }
 
 extern "C" void render_resize(unsigned w, unsigned h)
@@ -862,10 +889,11 @@ extern "C" void render_frame(const snapshot_t *snap)
 
     static const float density_row[3]    = { 20.0f, 24.0f, 28.0f };
     static const float density_header[3] = { 26.0f, 28.0f, 32.0f };
-    const float row_h    = density_row[g_density];
-    const float header_h = density_header[g_density];
-    const float bar_h    = 48.0f;
-    const float top      = bar_h + VIEW_TAB_BAR_H + 12.0f;
+    const float row_h    = density_row[g_density] * g_scale;
+    const float header_h = density_header[g_density] * g_scale;
+    const float bar_h    = 48.0f * g_scale;
+    const float view_tab_h_s = VIEW_TAB_BAR_H * g_scale;
+    const float top      = bar_h + view_tab_h_s + 12.0f * g_scale;
 
     draw_command_bar(th, g_w_dips, bar_h);
 
@@ -875,9 +903,9 @@ extern "C" void render_frame(const snapshot_t *snap)
             L"processes", L"cpu", L"memory", L"disk", L"network", L"gpu", L"forensic"
         };
         g_view_tab_y = bar_h;
-        g_view_tab_h = VIEW_TAB_BAR_H;
-        g_view_tab_w = 110.0f;
-        float tx = 14.0f;
+        g_view_tab_h = view_tab_h_s;
+        g_view_tab_w = 110.0f * g_scale;
+        float tx = 14.0f * g_scale;
 
         /* backdrop */
         g_brush->SetColor(to_d2d(th->subtle, 0.12f));
@@ -893,13 +921,13 @@ extern "C" void render_frame(const snapshot_t *snap)
             int active = (v == g_view);
             g_brush->SetColor(to_d2d(th->foreground, active ? 1.0f : 0.55f));
             g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            D2D1_RECT_F r = D2D1::RectF(tx, g_view_tab_y + 8.0f,
+            D2D1_RECT_F r = D2D1::RectF(tx, g_view_tab_y + 8.0f * g_scale,
                                         tx + g_view_tab_w, g_view_tab_y + g_view_tab_h);
             g_rt->DrawText(names[v], lstrlenW(names[v]), g_fmt_chrome, r, g_brush);
             if (active) {
                 g_brush->SetColor(to_d2d(th->accent, 1.0f));
-                g_rt->FillRectangle(D2D1::RectF(tx + 12.0f, g_view_tab_y + g_view_tab_h - 3.0f,
-                                                tx + g_view_tab_w - 12.0f,
+                g_rt->FillRectangle(D2D1::RectF(tx + 12.0f * g_scale, g_view_tab_y + g_view_tab_h - 3.0f * g_scale,
+                                                tx + g_view_tab_w - 12.0f * g_scale,
                                                 g_view_tab_y + g_view_tab_h - 1.0f), g_brush);
             }
             tx += g_view_tab_w;
