@@ -10,6 +10,7 @@
 #include "snapshot.h"
 #include "render.h"
 #include "filter.h"
+#include "etw.h"
 
 /* dwmapi constants that only exist on recent Windows SDKs. Declared unconditionally
    so the build works on older SDKs; DWM silently rejects them on pre-Win11 22H2. */
@@ -230,6 +231,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY:
         snapshot_stop();
+        etw_stop();
         render_destroy();
         PostQuitMessage(0);
         return 0;
@@ -275,6 +277,7 @@ static int run(void)
     apply_dwm(hwnd);
     render_init(hwnd);
     render_set_transparent(g_mica);
+    etw_start();
     snapshot_start(hwnd, 250);
     ShowWindow(hwnd, SW_SHOWDEFAULT);
 
