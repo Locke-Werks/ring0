@@ -6,14 +6,16 @@
 #include "gpu.h"
 #include <stdint.h>
 
-/* Snapshot arena pool. Four is enough cushion: the UI frame holds a snapshot
-   pointer for ~16ms and the sampler period is 250ms+, so the oldest arena
-   is always at least 750ms idle before recycling. */
-#define POOL_N 4
+/* Snapshot arena pool — sized so the time scrubber can show a full minute
+   of history at the default 250ms cadence (240 = 60 / 0.25). */
+#define POOL_N 240
 
 static arena_t          *g_scratch;
 static arena_t          *g_pool[POOL_N];
-static unsigned          g_next;            /* next pool slot to recycle */
+static snapshot_t       *g_published[POOL_N];   /* chronological pointers */
+static int               g_pub_head;            /* index of most recent in g_published */
+static int               g_pub_count;           /* valid entries, saturates at POOL_N */
+static unsigned          g_next;                /* next pool slot to recycle */
 static volatile snapshot_t *g_current;
 static const snapshot_t *g_prev_for_cpu;    /* used to compute cpu_pct deltas */
 static HANDLE            g_exit_event;
@@ -255,6 +257,10 @@ static void take_sample(void)
     history_age(snap->timestamp, 60000);
     path_cache_age(snap);
 
+    g_published[g_next] = snap;
+    g_pub_head = (int)g_next;
+    if (g_pub_count < POOL_N) ++g_pub_count;
+
     InterlockedExchangePointer((PVOID *)&g_current, snap);
     g_next = (g_next + 1) % POOL_N;
 
@@ -289,7 +295,10 @@ void snapshot_start(HWND notify, unsigned period_ms)
     gpu_init();
 
     g_scratch = arena_create(8 * 1024 * 1024);
-    for (int i = 0; i < POOL_N; ++i) g_pool[i] = arena_create(2 * 1024 * 1024);
+    /* 512 KiB reserve per pool slot is plenty: a snapshot of ~400 processes
+       fits in ~40 KiB. With POOL_N=240 the total VA reserve is ~120 MiB and
+       committed memory tracks actual snapshot size. */
+    for (int i = 0; i < POOL_N; ++i) g_pool[i] = arena_create(512 * 1024);
 
     g_exit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     g_thread     = CreateThread(NULL, 0, sampler_thread, NULL, 0, NULL);
@@ -312,6 +321,9 @@ void snapshot_stop(void)
     g_scratch = NULL;
     g_current = NULL;
     g_prev_for_cpu = NULL;
+    g_pub_count = 0;
+    g_pub_head = 0;
+    for (int i = 0; i < POOL_N; ++i) g_published[i] = NULL;
     history_destroy();
     gpu_destroy();
 }
@@ -320,3 +332,12 @@ const snapshot_t *snapshot_current(void)
 {
     return (const snapshot_t *)g_current;
 }
+
+const snapshot_t *snapshot_at(int back)
+{
+    if (back < 0 || back >= g_pub_count) return NULL;
+    int idx = (g_pub_head - back + POOL_N) % POOL_N;
+    return g_published[idx];
+}
+
+int snapshot_count(void) { return g_pub_count; }

@@ -53,6 +53,11 @@ void              snapshot_start(HWND notify, unsigned period_ms);
 void              snapshot_stop(void);
 const snapshot_t *snapshot_current(void);   /* atomic load, may be NULL early */
 
+/* Historical access. back=0 is the most recent published snapshot. Returns
+   NULL if back >= snapshot_count(). */
+const snapshot_t *snapshot_at(int back);
+int               snapshot_count(void);
+
 #ifdef __cplusplus
 }
 #endif
