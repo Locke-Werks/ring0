@@ -132,6 +132,20 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_KEYDOWN: {
+        BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (ctrl) {
+            if (wp == VK_OEM_PLUS || wp == VK_ADD) {
+                render_cycle_density(+1);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            if (wp == VK_OEM_MINUS || wp == VK_SUBTRACT) {
+                render_cycle_density(-1);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+        }
+
         const snapshot_t *s = snapshot_current();
         int cur = find_pid_index(s, g_selected_pid);
         switch (wp) {

@@ -32,6 +32,9 @@ void render_get_header_layout(int *top_y, int *h);
 int  render_col_at_x(int x);          /* -1 if outside any column */
 void render_toggle_sort(int col);     /* same col flips dir, new col resets to descending */
 
+/* Density: -1 compact, 0 normal, +1 comfortable. delta is signed step. */
+void render_cycle_density(int delta);
+
 #ifdef __cplusplus
 }
 #endif

@@ -28,6 +28,7 @@ static float                  g_col_xs[8], g_col_ws[8];      /* cached from last
 static int                    g_sort_col = -1;               /* -1 = NtQSI order */
 static int                    g_sort_desc = 1;
 static uint32_t               g_sort_idx[1024];
+static int                    g_density = 1;                 /* 0 compact, 1 normal, 2 comfy */
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -161,6 +162,13 @@ extern "C" int render_col_at_x(int x)
     return -1;
 }
 
+extern "C" void render_cycle_density(int delta)
+{
+    g_density += delta;
+    if (g_density < 0) g_density = 0;
+    if (g_density > 2) g_density = 2;
+}
+
 extern "C" void render_toggle_sort(int col)
 {
     if (col < 0 || col >= COL_COUNT) return;
@@ -257,8 +265,10 @@ extern "C" void render_frame(const snapshot_t *snap)
     compute_columns((float)g_w, xs, ws);
     for (int i = 0; i < COL_COUNT; ++i) { g_col_xs[i] = xs[i]; g_col_ws[i] = ws[i]; }
 
-    const float row_h    = 22.0f;
-    const float header_h = 28.0f;
+    static const float density_row[3]    = { 20.0f, 24.0f, 28.0f };
+    static const float density_header[3] = { 26.0f, 28.0f, 32.0f };
+    const float row_h    = density_row[g_density];
+    const float header_h = density_header[g_density];
     const float top      = 12.0f;
     g_header_top = (int)top;
     g_header_h   = (int)header_h;
