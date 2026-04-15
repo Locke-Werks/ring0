@@ -192,6 +192,8 @@ static const wchar_t *basename(const wchar_t *path)
 }
 
 static D2D1_COLOR_F to_d2d(COLORREF c, float a);   /* fwd decl */
+static void draw_inspector_body(const theme_t *th, float ix, float iy, float iw, float ih,
+                                const snapshot_t *snap, int with_backdrop);
 
 /* Bottom strip showing aggregate cpu/disk/net over the snapshot ring. */
 static const float SCRUBBER_H = 56.0f;
@@ -993,6 +995,12 @@ extern "C" void render_frame(const snapshot_t *snap)
                     D2D1::RectF(left_x + 6.0f, yy, g_w_dips - left_x, yy + 18.0f), g_brush);
                 yy += 20.0f;
             }
+        } else if (g_view == VIEW_FORENSIC) {
+            float ix = 0.0f;
+            float iy = bar_h + VIEW_TAB_BAR_H;
+            float iw = g_w_dips;
+            float ih = (g_h_dips - SCRUBBER_H) - iy;
+            draw_inspector_body(th, ix, iy, iw, ih, snap, 0 /* no backdrop */);
         } else if (g_view == VIEW_CPU && snap) {
             /* per-core meter grid */
             int cn = snap->cpu_core_count;
@@ -1270,71 +1278,105 @@ extern "C" void render_frame(const snapshot_t *snap)
     /* inspector panel */
     if (g_inspector_open) {
         float ix = grid_w;
-        float iy = bar_h;
+        float iy = bar_h + VIEW_TAB_BAR_H;
         float iw = INSPECTOR_W;
         float ih = (g_h_dips - SCRUBBER_H) - iy;
+        draw_inspector_body(th, ix, iy, iw, ih, snap, 1 /* with backdrop */);
+    }
 
+    /* scrubber strip spans full window width at the bottom */
+    g_scrubber_y = g_h_dips - SCRUBBER_H;
+    draw_scrubber(th, 0.0f, g_scrubber_y, g_w_dips, SCRUBBER_H);
+
+    /* playhead vertical bar at the current view position */
+    {
+        int hn = snapshot_count();
+        if (hn > 0) {
+            float col_w = g_w_dips / 240.0f;
+            int slot = (240 - hn) + ((hn - 1) - g_view_back);
+            if (slot < 0) slot = 0;
+            if (slot > 239) slot = 239;
+            g_brush->SetColor(to_d2d(th->accent, 1.0f));
+            float px = (float)slot * col_w + col_w * 0.5f;
+            g_rt->FillRectangle(D2D1::RectF(px - 1.0f, g_scrubber_y + 2.0f,
+                                            px + 1.0f, g_h_dips - 2.0f), g_brush);
+        }
+    }
+
+    HRESULT hr2 = g_rt->EndDraw();
+    if (hr2 == D2DERR_RECREATE_TARGET) {
+        if (g_brush) { g_brush->Release(); g_brush = nullptr; }
+        if (g_rt)    { g_rt->Release();    g_rt    = nullptr; }
+    }
+    return;
+}
+
+static void draw_inspector_body(const theme_t *th, float ix, float iy, float iw, float ih,
+                                const snapshot_t *snap, int with_backdrop)
+{
+    if (with_backdrop) {
         g_brush->SetColor(to_d2d(th->subtle, 0.22f));
         g_rt->FillRectangle(D2D1::RectF(ix, iy, ix + iw, iy + ih), g_brush);
 
         /* left divider */
         g_brush->SetColor(to_d2d(th->subtle, 0.6f));
         g_rt->FillRectangle(D2D1::RectF(ix, iy, ix + 1.0f, iy + ih), g_brush);
+    }
 
-        /* header */
-        g_brush->SetColor(to_d2d(th->foreground, 0.85f));
-        g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    /* header */
+    g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
 
-        wchar_t title[256];
-        const wchar_t *sel_name = L"no selection";
-        uint32_t sel_pid = 0;
-        if (g_selected_pid != 0xFFFFFFFFu) {
-            for (uint32_t i = 0; i < snap->n_processes; ++i) {
-                if (snap->processes[i].pid == g_selected_pid) {
-                    sel_pid = g_selected_pid;
-                    const wchar_t *nm = intern_get(snap->processes[i].image_name);
-                    if (nm) sel_name = nm;
-                    break;
-                }
+    wchar_t title[256];
+    const wchar_t *sel_name = L"no selection";
+    uint32_t sel_pid = 0;
+    if (snap && g_selected_pid != 0xFFFFFFFFu) {
+        for (uint32_t i = 0; i < snap->n_processes; ++i) {
+            if (snap->processes[i].pid == g_selected_pid) {
+                sel_pid = g_selected_pid;
+                const wchar_t *nm = intern_get(snap->processes[i].image_name);
+                if (nm) sel_name = nm;
+                break;
             }
         }
+    }
 
-        int tlen = sel_pid ? wsprintfW(title, L"%s  pid %u", sel_name, sel_pid)
-                           : wsprintfW(title, L"no selection");
-        D2D1_RECT_F title_r = D2D1::RectF(ix + 16.0f, iy + 12.0f,
-                                          ix + iw - 16.0f, iy + 36.0f);
-        g_rt->DrawText(title, (UINT32)tlen, g_fmt_chrome, title_r, g_brush);
+    int tlen = sel_pid ? wsprintfW(title, L"%s  pid %u", sel_name, sel_pid)
+                       : wsprintfW(title, L"no selection");
+    D2D1_RECT_F title_r = D2D1::RectF(ix + 16.0f, iy + 12.0f,
+                                      ix + iw - 16.0f, iy + 36.0f);
+    g_rt->DrawText(title, (UINT32)tlen, g_fmt_chrome, title_r, g_brush);
 
-        /* tab strip */
-        static const wchar_t *tabs[] = { L"modules", L"network", L"stack" };
-        float tab_x = ix + 16.0f;
-        g_tab_y = iy + 42.0f;
-        g_tab_w = 80.0f;
-        g_tab_h = 24.0f;
-        for (int t = 0; t < 3; ++t) {
-            g_tab_x[t] = tab_x;
-            int is_active = (t == g_inspector_tab);
-            g_brush->SetColor(to_d2d(
-                is_active ? th->accent : th->foreground,
-                is_active ? 1.0f : 0.55f));
-            D2D1_RECT_F tr = D2D1::RectF(tab_x, g_tab_y, tab_x + g_tab_w, g_tab_y + 20.0f);
-            g_rt->DrawText(tabs[t], lstrlenW(tabs[t]), g_fmt_chrome, tr, g_brush);
-            if (is_active) {
-                D2D1_RECT_F under = D2D1::RectF(tab_x, g_tab_y + 20.0f,
-                                                tab_x + 60.0f, g_tab_y + 22.0f);
-                g_rt->FillRectangle(under, g_brush);
-            }
-            tab_x += 90.0f;
+    /* tab strip */
+    static const wchar_t *tabs[] = { L"modules", L"network", L"stack" };
+    float tab_x = ix + 16.0f;
+    g_tab_y = iy + 42.0f;
+    g_tab_w = 80.0f;
+    g_tab_h = 24.0f;
+    for (int t = 0; t < 3; ++t) {
+        g_tab_x[t] = tab_x;
+        int is_active = (t == g_inspector_tab);
+        g_brush->SetColor(to_d2d(
+            is_active ? th->accent : th->foreground,
+            is_active ? 1.0f : 0.55f));
+        D2D1_RECT_F tr = D2D1::RectF(tab_x, g_tab_y, tab_x + g_tab_w, g_tab_y + 20.0f);
+        g_rt->DrawText(tabs[t], lstrlenW(tabs[t]), g_fmt_chrome, tr, g_brush);
+        if (is_active) {
+            D2D1_RECT_F under = D2D1::RectF(tab_x, g_tab_y + 20.0f,
+                                            tab_x + 60.0f, g_tab_y + 22.0f);
+            g_rt->FillRectangle(under, g_brush);
         }
+        tab_x += 90.0f;
+    }
 
-        /* divider under tabs */
-        g_brush->SetColor(to_d2d(th->subtle, 0.5f));
-        g_rt->FillRectangle(D2D1::RectF(ix + 16.0f, iy + 68.0f,
-                                        ix + iw - 16.0f, iy + 69.0f), g_brush);
+    /* divider under tabs */
+    g_brush->SetColor(to_d2d(th->subtle, 0.5f));
+    g_rt->FillRectangle(D2D1::RectF(ix + 16.0f, iy + 68.0f,
+                                    ix + iw - 16.0f, iy + 69.0f), g_brush);
 
-        float body_x = ix + 16.0f;
-        float body_y = iy + 82.0f;
-        float body_w = iw - 32.0f;
+    float body_x = ix + 16.0f;
+    float body_y = iy + 82.0f;
+    float body_w = iw - 32.0f;
 
         if (g_inspector_tab == 0) {
             /* modules tab */
@@ -1407,32 +1449,6 @@ extern "C" void render_frame(const snapshot_t *snap)
             /* stack tab — capture button + frame list */
             draw_stack_tab(th, body_x, body_y, body_w, iy + ih - 16.0f - body_y, sel_pid);
         }
-    }
-
-    /* scrubber strip spans full window width at the bottom */
-    g_scrubber_y = g_h_dips - SCRUBBER_H;
-    draw_scrubber(th, 0.0f, g_scrubber_y, g_w_dips, SCRUBBER_H);
-
-    /* playhead vertical bar at the current view position */
-    {
-        int hn = snapshot_count();
-        if (hn > 0) {
-            float col_w = g_w_dips / 240.0f;
-            int slot = (240 - hn) + ((hn - 1) - g_view_back);
-            if (slot < 0) slot = 0;
-            if (slot > 239) slot = 239;
-            g_brush->SetColor(to_d2d(th->accent, 1.0f));
-            float px = (float)slot * col_w + col_w * 0.5f;
-            g_rt->FillRectangle(D2D1::RectF(px - 1.0f, g_scrubber_y + 2.0f,
-                                            px + 1.0f, g_h_dips - 2.0f), g_brush);
-        }
-    }
-
-    HRESULT hr = g_rt->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) {
-        if (g_brush) { g_brush->Release(); g_brush = nullptr; }
-        if (g_rt)    { g_rt->Release();    g_rt    = nullptr; }
-    }
 }
 
 extern "C" void render_destroy()
