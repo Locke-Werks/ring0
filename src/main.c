@@ -11,6 +11,7 @@
 #include "render.h"
 #include "filter.h"
 #include "etw.h"
+#include "trust.h"
 
 /* dwmapi constants that only exist on recent Windows SDKs. Declared unconditionally
    so the build works on older SDKs; DWM silently rejects them on pre-Win11 22H2. */
@@ -246,6 +247,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_DESTROY:
+        trust_stop();
         snapshot_stop();
         etw_stop();
         render_destroy();
@@ -295,6 +297,7 @@ static int run(void)
     render_set_transparent(g_mica);
     etw_start();
     snapshot_start(hwnd, 250);
+    trust_start();
     ShowWindow(hwnd, SW_SHOWDEFAULT);
 
     MSG m;
