@@ -46,6 +46,9 @@ static int                    g_inspector_open = 1;
 static int                    g_inspector_tab;        /* 0 modules, 1 network */
 static const float            INSPECTOR_W = 360.0f;
 static float                  g_tab_x[2], g_tab_y, g_tab_w, g_tab_h;
+static int                    g_view_back;          /* 0 = live */
+static int                    g_paused;
+static float                  g_scrubber_y;
 
 /* module-list cache — refreshed only when the selected pid or tab changes so
    we don't pay the toolhelp cost per frame. */
@@ -384,6 +387,34 @@ extern "C" int render_hit_tab(int x, int y)
     return -1;
 }
 
+extern "C" void render_set_view_back(int back)
+{
+    int n = snapshot_count();
+    if (back < 0) back = 0;
+    if (back >= n && n > 0) back = n - 1;
+    g_view_back = back;
+}
+extern "C" int render_get_view_back(void) { return g_view_back; }
+extern "C" void render_toggle_paused(void) { g_paused = !g_paused; if (!g_paused) g_view_back = 0; }
+extern "C" int  render_is_paused(void)     { return g_paused || g_view_back > 0; }
+
+extern "C" int render_hit_scrubber(int x, int y)
+{
+    if ((float)y < g_scrubber_y || (float)y >= g_scrubber_y + SCRUBBER_H) return -1;
+    int n = snapshot_count();
+    if (n == 0) return -1;
+    /* scrubber spans full window width with 240-sample slots */
+    float col_w = g_w_dips / 240.0f;
+    int slot = (int)((float)x / col_w);          /* 0..239, left = oldest */
+    /* scrubber currently shows the most recent n samples right-aligned, with
+       (240 - n) empty slots on the left. convert click slot back to view_back */
+    int empty = 240 - n;
+    int idx_in_history = slot - empty;
+    if (idx_in_history < 0) return n - 1;        /* clicked empty area = oldest */
+    if (idx_in_history >= n) idx_in_history = n - 1;
+    return (n - 1) - idx_in_history;             /* most recent = back 0 */
+}
+
 extern "C" int render_hit_pill(int x, int y)
 {
     if ((float)y < g_pill_y || (float)y >= g_pill_y + g_pill_h) return -1;
@@ -605,6 +636,12 @@ extern "C" void render_frame(const snapshot_t *snap)
 {
     if (!g_rt) create_target();
     if (!g_rt || !g_fmt_data || !g_fmt_chrome || !g_brush) return;
+
+    /* if user has scrubbed back, show that snapshot instead of live */
+    if (g_view_back > 0) {
+        const snapshot_t *hist = snapshot_at(g_view_back);
+        if (hist) snap = hist;
+    }
 
     const theme_t *th = theme_current();
 
@@ -931,7 +968,23 @@ extern "C" void render_frame(const snapshot_t *snap)
     }
 
     /* scrubber strip spans full window width at the bottom */
-    draw_scrubber(th, 0.0f, g_h_dips - SCRUBBER_H, g_w_dips, SCRUBBER_H);
+    g_scrubber_y = g_h_dips - SCRUBBER_H;
+    draw_scrubber(th, 0.0f, g_scrubber_y, g_w_dips, SCRUBBER_H);
+
+    /* playhead vertical bar at the current view position */
+    {
+        int hn = snapshot_count();
+        if (hn > 0) {
+            float col_w = g_w_dips / 240.0f;
+            int slot = (240 - hn) + ((hn - 1) - g_view_back);
+            if (slot < 0) slot = 0;
+            if (slot > 239) slot = 239;
+            g_brush->SetColor(to_d2d(th->accent, 1.0f));
+            float px = (float)slot * col_w + col_w * 0.5f;
+            g_rt->FillRectangle(D2D1::RectF(px - 1.0f, g_scrubber_y + 2.0f,
+                                            px + 1.0f, g_h_dips - 2.0f), g_brush);
+        }
+    }
 
     HRESULT hr = g_rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {

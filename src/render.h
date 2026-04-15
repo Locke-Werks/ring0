@@ -48,6 +48,13 @@ void render_set_inspector_tab(int tab);   /* 0 modules, 1 network */
 int  render_inspector_visible(void);
 int  render_hit_tab(int x, int y);        /* -1 if not on an inspector tab */
 
+/* Scrubber playhead. view_back == 0 means live (latest snapshot). */
+void render_set_view_back(int back);
+int  render_get_view_back(void);
+int  render_hit_scrubber(int x, int y);   /* returns view_back for click x, or -1 */
+void render_toggle_paused(void);
+int  render_is_paused(void);
+
 #ifdef __cplusplus
 }
 #endif

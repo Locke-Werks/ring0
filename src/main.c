@@ -153,6 +153,13 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
+        int back = render_hit_scrubber(x, y);
+        if (back >= 0) {
+            SetCapture(hwnd);
+            render_set_view_back(back);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         int htop = 0, hh = 0;
         render_get_header_layout(&htop, &hh);
@@ -171,6 +178,21 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetFocus(hwnd);
         return 0;
     }
+
+    case WM_MOUSEMOVE:
+        if (wp & MK_LBUTTON) {
+            int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+            int back = render_hit_scrubber(x, y);
+            if (back >= 0) {
+                render_set_view_back(back);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (GetCapture() == hwnd) ReleaseCapture();
+        return 0;
 
     case WM_MOUSEWHEEL: {
         int delta = (short)HIWORD(wp);
@@ -230,8 +252,17 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case VK_END:   if (s) select_index(hwnd, (int)s->n_processes - 1); return 0;
         case VK_ESCAPE:
             if (g_filter_len > 0) { filter_clear(hwnd); return 0; }
+            if (render_get_view_back() > 0) {
+                render_set_view_back(0);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
             g_selected_pid = 0xFFFFFFFFu;
             render_set_selected(0xFFFFFFFFu);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        case VK_SPACE:
+            render_toggle_paused();
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
