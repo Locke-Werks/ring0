@@ -29,7 +29,9 @@
 #endif
 
 static BOOL     g_mica;
-static unsigned g_selected_pid;
+static unsigned g_selected_pid = 0xFFFFFFFFu;   /* sentinel for "nothing selected"
+                                                   so we don't accidentally match
+                                                   the System Idle Process at pid 0 */
 
 static int find_pid_index(const snapshot_t *s, unsigned pid)
 {
@@ -93,13 +95,27 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_LBUTTONDOWN: {
+        /* WM_LBUTTONDOWN gives client coords in physical pixels under PMv2,
+           but render's layout coords are DIPs — convert before comparing. */
+        UINT dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0) dpi = 96;
+        int x = MulDiv((short)LOWORD(lp), 96, (int)dpi);
+        int y = MulDiv((short)HIWORD(lp), 96, (int)dpi);
+
+        int htop = 0, hh = 0;
+        render_get_header_layout(&htop, &hh);
+        if (y >= htop && y < htop + hh) {
+            int col = render_col_at_x(x);
+            if (col >= 0) {
+                render_toggle_sort(col);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+        }
         int top = 0, row = 0;
         render_get_data_layout(&top, &row);
-        if (row > 0) {
-            int y = (short)HIWORD(lp);
-            if (y >= top)
-                select_index(hwnd, render_get_scroll() + (y - top) / row);
-        }
+        if (row > 0 && y >= top)
+            select_index(hwnd, render_get_scroll() + (y - top) / row);
         SetFocus(hwnd);
         return 0;
     }
@@ -126,8 +142,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case VK_HOME:  select_index(hwnd, 0);                return 0;
         case VK_END:   if (s) select_index(hwnd, (int)s->n_processes - 1); return 0;
         case VK_ESCAPE:
-            g_selected_pid = 0;
-            render_set_selected(0);
+            g_selected_pid = 0xFFFFFFFFu;
+            render_set_selected(0xFFFFFFFFu);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }

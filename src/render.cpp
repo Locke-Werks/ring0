@@ -18,10 +18,15 @@ static ID2D1SolidColorBrush  *g_brush      = nullptr;   /* recolored per draw */
 static HWND                   g_hwnd       = nullptr;
 static unsigned               g_w, g_h;
 static BOOL                   g_transparent;
-static unsigned               g_selected_pid;
+static unsigned               g_selected_pid = 0xFFFFFFFFu;
 static int                    g_data_top_y, g_data_row_h;
 static int                    g_scroll_rows;
 static int                    g_visible_rows;
+static int                    g_header_top, g_header_h;
+static float                  g_col_xs[8], g_col_ws[8];      /* cached from last frame */
+static int                    g_sort_col = -1;               /* -1 = NtQSI order */
+static int                    g_sort_desc = 1;
+static uint32_t               g_sort_idx[1024];
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -140,6 +145,69 @@ extern "C" void render_set_scroll(int rows) { g_scroll_rows = rows < 0 ? 0 : row
 extern "C" int  render_get_scroll(void)     { return g_scroll_rows; }
 extern "C" int  render_get_visible_rows(void) { return g_visible_rows; }
 
+extern "C" void render_get_header_layout(int *top_y, int *h)
+{
+    if (top_y) *top_y = g_header_top;
+    if (h)     *h     = g_header_h;
+}
+
+extern "C" int render_col_at_x(int x)
+{
+    for (int i = 0; i < COL_COUNT; ++i) {
+        if ((float)x >= g_col_xs[i] && (float)x < g_col_xs[i] + g_col_ws[i])
+            return i;
+    }
+    return -1;
+}
+
+extern "C" void render_toggle_sort(int col)
+{
+    if (col < 0 || col >= COL_COUNT) return;
+    if (col == g_sort_col) { g_sort_desc = !g_sort_desc; return; }
+    g_sort_col  = col;
+    g_sort_desc = (col == COL_NAME) ? 0 : 1;   /* name asc, everything else desc */
+}
+
+static int cmp_proc(const process_t *a, const process_t *b, int col)
+{
+    switch (col) {
+    case COL_PID: return (a->pid < b->pid) ? -1 : (a->pid > b->pid ? 1 : 0);
+    case COL_CPU: return (int)a->cpu_pct - (int)b->cpu_pct;
+    case COL_MEM: return (a->working_set < b->working_set) ? -1 :
+                         (a->working_set > b->working_set ? 1 : 0);
+    case COL_THR: return (int)a->thread_count - (int)b->thread_count;
+    case COL_HND: return (int)a->handle_count - (int)b->handle_count;
+    case COL_NAME: {
+        const wchar_t *na = intern_get(a->image_name);
+        const wchar_t *nb = intern_get(b->image_name);
+        return lstrcmpiW(na ? na : L"", nb ? nb : L"");
+    }
+    }
+    return 0;
+}
+
+static int proc_order(const process_t *a, const process_t *b)
+{
+    int r = cmp_proc(a, b, g_sort_col);
+    if (g_sort_desc) r = -r;
+    if (r == 0) r = (a->pid < b->pid) ? -1 : (a->pid > b->pid ? 1 : 0);
+    return r;
+}
+
+static void sort_indices(uint32_t *idx, int n, const process_t *procs)
+{
+    /* insertion sort — n is ~300 and the array is mostly already sorted by pid */
+    for (int i = 1; i < n; ++i) {
+        uint32_t cur = idx[i];
+        int j = i - 1;
+        while (j >= 0 && proc_order(&procs[idx[j]], &procs[cur]) > 0) {
+            idx[j + 1] = idx[j];
+            --j;
+        }
+        idx[j + 1] = cur;
+    }
+}
+
 extern "C" void render_resize(unsigned w, unsigned h)
 {
     g_w = w; g_h = h;
@@ -186,17 +254,23 @@ extern "C" void render_frame(const snapshot_t *snap)
 
     float xs[COL_COUNT], ws[COL_COUNT];
     compute_columns((float)g_w, xs, ws);
+    for (int i = 0; i < COL_COUNT; ++i) { g_col_xs[i] = xs[i]; g_col_ws[i] = ws[i]; }
 
     const float row_h    = 22.0f;
     const float header_h = 28.0f;
     const float top      = 12.0f;
+    g_header_top = (int)top;
+    g_header_h   = (int)header_h;
     wchar_t buf[256];
 
     /* header row in segoe, slightly muted */
     g_brush->SetColor(to_d2d(th->foreground, 0.65f));
     for (int i = 0; i < COL_COUNT; ++i) {
-        int len = lstrlenW(g_cols[i].label);
-        draw_cell(g_fmt_chrome, g_cols[i].label, len,
+        wchar_t hbuf[64];
+        const wchar_t *arrow = L"";
+        if (i == g_sort_col) arrow = g_sort_desc ? L"  v" : L"  ^";
+        int len = wsprintfW(hbuf, L"%s%s", g_cols[i].label, arrow);
+        draw_cell(g_fmt_chrome, hbuf, len,
                   xs[i], ws[i], top, header_h, g_cols[i].right_align);
     }
 
@@ -220,9 +294,15 @@ extern "C" void render_frame(const snapshot_t *snap)
     if (g_scroll_rows > max_scroll) g_scroll_rows = max_scroll;
     uint32_t start = (uint32_t)g_scroll_rows;
 
-    for (uint32_t i = start; i < snap->n_processes; ++i) {
+    /* build sort order */
+    uint32_t n = snap->n_processes;
+    if (n > 1024) n = 1024;
+    for (uint32_t i = 0; i < n; ++i) g_sort_idx[i] = i;
+    if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
+
+    for (uint32_t i = start; i < n; ++i) {
         if (y + row_h > (float)g_h) break;
-        const process_t *p = &snap->processes[i];
+        const process_t *p = &snap->processes[g_sort_idx[i]];
         int len;
 
         if (p->pid == g_selected_pid) {

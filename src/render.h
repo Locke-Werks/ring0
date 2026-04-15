@@ -27,6 +27,11 @@ void render_set_scroll(int rows);
 int  render_get_scroll(void);
 int  render_get_visible_rows(void);
 
+/* Header hit testing + sort. */
+void render_get_header_layout(int *top_y, int *h);
+int  render_col_at_x(int x);          /* -1 if outside any column */
+void render_toggle_sort(int col);     /* same col flips dir, new col resets to descending */
+
 #ifdef __cplusplus
 }
 #endif
