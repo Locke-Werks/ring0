@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <tlhelp32.h>
 /* GDI's DrawText macro shadows ID2D1RenderTarget::DrawText. */
 #undef DrawText
 #include <d2d1.h>
@@ -39,6 +40,53 @@ static float                  g_pill_x[3], g_pill_y, g_pill_w, g_pill_h;
 static int                    g_inspector_open = 1;
 static int                    g_inspector_tab;        /* 0 modules, 1 network */
 static const float            INSPECTOR_W = 360.0f;
+
+/* module-list cache — refreshed only when the selected pid or tab changes so
+   we don't pay the toolhelp cost per frame. */
+struct mod_entry {
+    uint64_t base;
+    uint32_t path_intern;
+    uint32_t _pad;
+};
+#define MODS_MAX 512
+static struct mod_entry       g_mods[MODS_MAX];
+static int                    g_mods_n;
+static unsigned               g_mods_pid = 0xFFFFFFFFu;
+static int                    g_mods_access_denied;
+
+static void refresh_modules(unsigned pid)
+{
+    g_mods_n = 0;
+    g_mods_pid = pid;
+    g_mods_access_denied = 0;
+    if (pid == 0xFFFFFFFFu || pid == 0) return;
+
+    HANDLE snap = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) { g_mods_access_denied = 1; return; }
+
+    MODULEENTRY32W me;
+    me.dwSize = sizeof me;
+    if (Module32FirstW(snap, &me)) {
+        do {
+            if (g_mods_n >= MODS_MAX) break;
+            g_mods[g_mods_n].base = (uint64_t)(ULONG_PTR)me.modBaseAddr;
+            int plen = lstrlenW(me.szExePath);
+            g_mods[g_mods_n].path_intern = intern_str(me.szExePath, (size_t)plen);
+            g_mods[g_mods_n]._pad = 0;
+            ++g_mods_n;
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+}
+
+static const wchar_t *basename(const wchar_t *path)
+{
+    const wchar_t *p = path;
+    const wchar_t *out = path;
+    while (*p) { if (*p == L'\\' || *p == L'/') out = p + 1; ++p; }
+    return out;
+}
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -632,10 +680,50 @@ extern "C" void render_frame(const snapshot_t *snap)
         g_rt->FillRectangle(D2D1::RectF(ix + 16.0f, iy + 68.0f,
                                         ix + iw - 16.0f, iy + 69.0f), g_brush);
 
-        g_brush->SetColor(to_d2d(th->foreground, 0.45f));
-        D2D1_RECT_F body = D2D1::RectF(ix + 16.0f, iy + 80.0f,
-                                       ix + iw - 16.0f, iy + ih - 16.0f);
-        g_rt->DrawText(L"\u2014 empty \u2014", 9, g_fmt_chrome, body, g_brush);
+        float body_x = ix + 16.0f;
+        float body_y = iy + 82.0f;
+        float body_w = iw - 32.0f;
+
+        if (g_inspector_tab == 0) {
+            /* modules tab */
+            if (sel_pid == 0) {
+                g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+                D2D1_RECT_F r = D2D1::RectF(body_x, body_y, body_x + body_w, body_y + 20.0f);
+                g_rt->DrawText(L"select a process to see its modules",
+                    34, g_fmt_chrome, r, g_brush);
+            } else {
+                if (sel_pid != g_mods_pid) refresh_modules(sel_pid);
+                if (g_mods_access_denied) {
+                    g_brush->SetColor(to_d2d(th->foreground, 0.55f));
+                    D2D1_RECT_F r = D2D1::RectF(body_x, body_y, body_x + body_w, body_y + 20.0f);
+                    g_rt->DrawText(L"access denied (ppl/pp?)",
+                        23, g_fmt_chrome, r, g_brush);
+                } else if (g_mods_n == 0) {
+                    g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+                    D2D1_RECT_F r = D2D1::RectF(body_x, body_y, body_x + body_w, body_y + 20.0f);
+                    g_rt->DrawText(L"no modules", 10, g_fmt_chrome, r, g_brush);
+                } else {
+                    float line_h = 16.0f;
+                    g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+                    g_fmt_data->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    float ry = body_y;
+                    for (int m = 0; m < g_mods_n; ++m) {
+                        if (ry + line_h > iy + ih - 8.0f) break;
+                        const wchar_t *p = intern_get(g_mods[m].path_intern);
+                        const wchar_t *name = p ? basename(p) : L"";
+                        D2D1_RECT_F r = D2D1::RectF(body_x, ry,
+                            body_x + body_w, ry + line_h);
+                        g_rt->DrawText(name, lstrlenW(name), g_fmt_data, r, g_brush);
+                        ry += line_h;
+                    }
+                }
+            }
+        } else {
+            g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+            D2D1_RECT_F body = D2D1::RectF(body_x, body_y,
+                                           body_x + body_w, iy + ih - 16.0f);
+            g_rt->DrawText(L"\u2014 empty \u2014", 9, g_fmt_chrome, body, g_brush);
+        }
     }
 
     HRESULT hr = g_rt->EndDraw();
