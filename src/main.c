@@ -13,6 +13,8 @@
 #include "etw.h"
 #include "trust.h"
 
+int stack_capture(unsigned pid);
+
 /* dwmapi constants that only exist on recent Windows SDKs. Declared unconditionally
    so the build works on older SDKs; DWM silently rejects them on pre-Win11 22H2. */
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -160,6 +162,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
+        if (render_hit_capture_btn(x, y)) {
+            stack_capture(g_selected_pid);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         int htop = 0, hh = 0;
         render_get_header_layout(&htop, &hh);
@@ -223,7 +230,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
-            if (wp >= '1' && wp <= '2') {
+            if (wp >= '1' && wp <= '3') {
                 render_set_inspector_tab((int)(wp - '1'));
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;

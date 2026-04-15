@@ -60,6 +60,9 @@ int  render_is_paused(void);
 void render_toggle_diff(void);
 int  render_diff_active(void);
 
+/* Stack tab: capture button hit-test. */
+int  render_hit_capture_btn(int x, int y);
+
 #ifdef __cplusplus
 }
 #endif

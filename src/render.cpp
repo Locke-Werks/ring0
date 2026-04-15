@@ -43,9 +43,9 @@ static int                    g_filter_caret;
 static int                    g_scope;                /* 0 all, 1 user, 2 system */
 static float                  g_pill_x[3], g_pill_y, g_pill_w, g_pill_h;
 static int                    g_inspector_open = 1;
-static int                    g_inspector_tab;        /* 0 modules, 1 network */
+static int                    g_inspector_tab;        /* 0 modules, 1 network, 2 stack */
 static const float            INSPECTOR_W = 360.0f;
-static float                  g_tab_x[2], g_tab_y, g_tab_w, g_tab_h;
+static float                  g_tab_x[3], g_tab_y, g_tab_w, g_tab_h;
 static int                    g_view_back;          /* 0 = live */
 static int                    g_paused;
 static float                  g_scrubber_y;
@@ -142,6 +142,91 @@ static void draw_scrubber(const theme_t *th, float x, float y, float w, float h)
                                     bx + col_w, chart_y + chart_h);
         g_rt->FillRectangle(r, g_brush);
     }
+}
+
+/* Stack capture state — populated by stack.c (Phase 7 next commit). */
+struct stack_frame {
+    uint64_t addr;
+    uint32_t module_intern;     /* basename */
+    uint32_t symbol_intern;     /* "func+0xN", or empty */
+    uint32_t hits;              /* aggregated count */
+    uint32_t _pad;
+};
+#define STACK_FRAMES_MAX 256
+static struct stack_frame g_stack_frames[STACK_FRAMES_MAX];
+static int                g_stack_n;
+static unsigned           g_stack_pid;
+static int                g_stack_capturing;
+static float              g_capture_btn_x, g_capture_btn_y, g_capture_btn_w, g_capture_btn_h;
+
+/* commit 41 will fill these in */
+extern "C" int  stack_capture(unsigned pid);
+extern "C" void stack_clear(void);
+
+static void draw_stack_tab(const theme_t *th, float x, float y, float w, float h, unsigned pid)
+{
+    if (pid == 0) {
+        g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+        D2D1_RECT_F r = D2D1::RectF(x, y, x + w, y + 20.0f);
+        g_rt->DrawText(L"select a process to capture its stack", 36,
+            g_fmt_chrome, r, g_brush);
+        return;
+    }
+
+    /* capture button */
+    g_capture_btn_x = x;
+    g_capture_btn_y = y;
+    g_capture_btn_w = 120.0f;
+    g_capture_btn_h = 28.0f;
+    D2D1_ROUNDED_RECT rr;
+    rr.rect = D2D1::RectF(g_capture_btn_x, g_capture_btn_y,
+                          g_capture_btn_x + g_capture_btn_w,
+                          g_capture_btn_y + g_capture_btn_h);
+    rr.radiusX = rr.radiusY = 6.0f;
+    g_brush->SetColor(to_d2d(th->accent, 0.55f));
+    g_rt->FillRoundedRectangle(rr, g_brush);
+    g_brush->SetColor(to_d2d(th->foreground, 1.0f));
+    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    D2D1_RECT_F br = rr.rect; br.top += 4.0f;
+    g_rt->DrawText(L"capture stack", 13, g_fmt_chrome, br, g_brush);
+
+    /* status / frame list */
+    float list_y = y + g_capture_btn_h + 12.0f;
+    float line_h = 16.0f;
+    g_fmt_data->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+
+    if (g_stack_n == 0 || g_stack_pid != pid) {
+        g_brush->SetColor(to_d2d(th->foreground, 0.45f));
+        D2D1_RECT_F r = D2D1::RectF(x, list_y, x + w, list_y + 20.0f);
+        g_rt->DrawText(L"no capture for this process",
+            27, g_fmt_chrome, r, g_brush);
+        return;
+    }
+
+    g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+    wchar_t line[512];
+    float ry = list_y;
+    for (int i = 0; i < g_stack_n; ++i) {
+        if (ry + line_h > y + h) break;
+        const wchar_t *mod = intern_get(g_stack_frames[i].module_intern);
+        const wchar_t *sym = intern_get(g_stack_frames[i].symbol_intern);
+        int n = wsprintfW(line, L"%4u  %s!%s",
+            g_stack_frames[i].hits,
+            mod ? mod : L"?",
+            sym ? sym : L"?");
+        D2D1_RECT_F r = D2D1::RectF(x, ry, x + w, ry + line_h);
+        g_rt->DrawText(line, (UINT32)n, g_fmt_data, r, g_brush);
+        ry += line_h;
+    }
+}
+
+extern "C" int render_hit_capture_btn(int x, int y)
+{
+    if ((float)x < g_capture_btn_x ||
+        (float)x >= g_capture_btn_x + g_capture_btn_w) return 0;
+    if ((float)y < g_capture_btn_y ||
+        (float)y >= g_capture_btn_y + g_capture_btn_h) return 0;
+    return 1;
 }
 
 /* TCP connection cache */
@@ -375,14 +460,14 @@ extern "C" void render_set_scope(int scope)
 }
 
 extern "C" void render_toggle_inspector(void) { g_inspector_open = !g_inspector_open; }
-extern "C" void render_set_inspector_tab(int t) { if (t >= 0 && t < 2) g_inspector_tab = t; }
+extern "C" void render_set_inspector_tab(int t) { if (t >= 0 && t < 3) g_inspector_tab = t; }
 extern "C" int  render_inspector_visible(void) { return g_inspector_open; }
 
 extern "C" int render_hit_tab(int x, int y)
 {
     if (!g_inspector_open) return -1;
     if ((float)y < g_tab_y || (float)y >= g_tab_y + g_tab_h) return -1;
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         if ((float)x >= g_tab_x[i] && (float)x < g_tab_x[i] + g_tab_w) return i;
     }
     return -1;
@@ -903,12 +988,12 @@ extern "C" void render_frame(const snapshot_t *snap)
         g_rt->DrawText(title, (UINT32)tlen, g_fmt_chrome, title_r, g_brush);
 
         /* tab strip */
-        static const wchar_t *tabs[] = { L"modules", L"network" };
+        static const wchar_t *tabs[] = { L"modules", L"network", L"stack" };
         float tab_x = ix + 16.0f;
         g_tab_y = iy + 42.0f;
         g_tab_w = 80.0f;
         g_tab_h = 24.0f;
-        for (int t = 0; t < 2; ++t) {
+        for (int t = 0; t < 3; ++t) {
             g_tab_x[t] = tab_x;
             int is_active = (t == g_inspector_tab);
             g_brush->SetColor(to_d2d(
@@ -967,7 +1052,7 @@ extern "C" void render_frame(const snapshot_t *snap)
                     }
                 }
             }
-        } else {
+        } else if (g_inspector_tab == 1) {
             /* network tab */
             if (sel_pid == 0) {
                 g_brush->SetColor(to_d2d(th->foreground, 0.45f));
@@ -1000,6 +1085,9 @@ extern "C" void render_frame(const snapshot_t *snap)
                     }
                 }
             }
+        } else {
+            /* stack tab — capture button + frame list */
+            draw_stack_tab(th, body_x, body_y, body_w, iy + ih - 16.0f - body_y, sel_pid);
         }
     }
 
