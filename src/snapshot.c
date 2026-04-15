@@ -3,6 +3,20 @@
 #include "intern.h"
 #include <stdint.h>
 
+/* Snapshot arena pool. Four is enough cushion: the UI frame holds a snapshot
+   pointer for ~16ms and the sampler period is 250ms+, so the oldest arena
+   is always at least 750ms idle before recycling. */
+#define POOL_N 4
+
+static arena_t          *g_scratch;
+static arena_t          *g_pool[POOL_N];
+static unsigned          g_next;            /* next pool slot to recycle */
+static volatile snapshot_t *g_current;
+static HANDLE            g_exit_event;
+static HANDLE            g_thread;
+static HWND              g_notify;
+static unsigned          g_period_ms;
+
 /* Build a compact process table from NtQuerySystemInformation(SystemProcessInformation).
    The NT call returns a variable-sized blob (typically ~1 MB on a busy box) into
    `scratch`. We then walk the linked list and emit POD process_t entries into
@@ -82,4 +96,66 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
     }
 
     return snap;
+}
+
+static void take_sample(void)
+{
+    arena_t *dest = g_pool[g_next];
+    arena_reset(dest);
+    snapshot_t *snap = snapshot_build(dest, g_scratch);
+    if (!snap) return;
+
+    InterlockedExchangePointer((PVOID *)&g_current, snap);
+    g_next = (g_next + 1) % POOL_N;
+
+    if (g_notify) InvalidateRect(g_notify, NULL, FALSE);
+}
+
+static DWORD WINAPI sampler_thread(LPVOID p)
+{
+    (void)p;
+    take_sample();
+    while (WaitForSingleObject(g_exit_event, g_period_ms) == WAIT_TIMEOUT) {
+        take_sample();
+    }
+    return 0;
+}
+
+void snapshot_start(HWND notify, unsigned period_ms)
+{
+    if (g_thread) return;
+    nt_init();
+    intern_init();
+
+    g_notify    = notify;
+    g_period_ms = period_ms ? period_ms : 250;
+
+    g_scratch = arena_create(8 * 1024 * 1024);
+    for (int i = 0; i < POOL_N; ++i) g_pool[i] = arena_create(2 * 1024 * 1024);
+
+    g_exit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_thread     = CreateThread(NULL, 0, sampler_thread, NULL, 0, NULL);
+}
+
+void snapshot_stop(void)
+{
+    if (!g_thread) return;
+    SetEvent(g_exit_event);
+    WaitForSingleObject(g_thread, 2000);
+    CloseHandle(g_thread);
+    CloseHandle(g_exit_event);
+    g_thread = NULL;
+
+    for (int i = 0; i < POOL_N; ++i) {
+        arena_destroy(g_pool[i]);
+        g_pool[i] = NULL;
+    }
+    arena_destroy(g_scratch);
+    g_scratch = NULL;
+    g_current = NULL;
+}
+
+const snapshot_t *snapshot_current(void)
+{
+    return (const snapshot_t *)g_current;
 }

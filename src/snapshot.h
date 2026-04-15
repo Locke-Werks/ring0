@@ -1,5 +1,7 @@
 #pragma once
 #include <stdint.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include "arena.h"
 
 typedef struct {
@@ -28,3 +30,10 @@ typedef struct {
 } snapshot_t;
 
 snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch);
+
+/* Sampler. Spawns one background thread that wakes every `period_ms` ms,
+   builds a fresh snapshot, and publishes it via atomic pointer swap.
+   notify is invalidated after each successful publish so the UI repaints. */
+void              snapshot_start(HWND notify, unsigned period_ms);
+void              snapshot_stop(void);
+const snapshot_t *snapshot_current(void);   /* atomic load, may be NULL early */
