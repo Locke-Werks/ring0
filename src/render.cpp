@@ -8,6 +8,7 @@
 #include "render.h"
 #include "theme.h"
 #include "intern.h"
+#include "history.h"
 
 static ID2D1Factory          *g_d2d        = nullptr;
 static IDWriteFactory        *g_dw         = nullptr;
@@ -38,12 +39,12 @@ struct Col {
 enum { COL_PID, COL_CPU, COL_MEM, COL_THR, COL_HND, COL_NAME, COL_COUNT };
 
 static const Col g_cols[COL_COUNT] = {
-    { L"PID",   70, true  },
-    { L"CPU%",  70, true  },
-    { L"MEM",   90, true  },
-    { L"THR",   50, true  },
-    { L"HND",   60, true  },
-    { L"IMAGE", -1, false },
+    { L"PID",   70,  true  },
+    { L"CPU%",  140, true  },     /* widened to fit inline sparkline */
+    { L"MEM",   90,  true  },
+    { L"THR",   50,  true  },
+    { L"HND",   60,  true  },
+    { L"IMAGE", -1,  false },
 };
 
 static const float COL_PAD = 12.0f;
@@ -319,6 +320,31 @@ extern "C" void render_frame(const snapshot_t *snap)
         g_brush->SetColor(to_d2d(th->foreground, 1.0f));
         len = fmt_uint(buf, p->pid);
         draw_cell(g_fmt_data, buf, len, xs[COL_PID], ws[COL_PID], y, row_h, true);
+
+        /* sparkline takes the left ~60 DIPs of the CPU% column, numeric value
+           pinned right. */
+        const float spark_w = 60.0f;
+        const float spark_h = row_h - 8.0f;
+        const float spark_x = xs[COL_CPU];
+        const float spark_y = y + 4.0f;
+        uint16_t hist[HIST_SAMPLES];
+        int hn = history_copy(p->pid, p->create_time, hist, HIST_SAMPLES);
+        if (hn >= 2) {
+            g_brush->SetColor(to_d2d(th->accent, 0.85f));
+            float dx = spark_w / (float)(hn - 1);
+            for (int s = 1; s < hn; ++s) {
+                float a = (float)hist[s - 1] / 1000.0f;
+                float b = (float)hist[s]     / 1000.0f;
+                if (a > 1.0f) a = 1.0f;
+                if (b > 1.0f) b = 1.0f;
+                float y1 = spark_y + spark_h - a * spark_h;
+                float y2 = spark_y + spark_h - b * spark_h;
+                g_rt->DrawLine(D2D1::Point2F(spark_x + (s - 1) * dx, y1),
+                               D2D1::Point2F(spark_x + s * dx,       y2),
+                               g_brush, 1.0f);
+            }
+            g_brush->SetColor(to_d2d(th->foreground, 1.0f));
+        }
 
         unsigned pct_int = p->cpu_pct / 10;
         unsigned pct_dec = p->cpu_pct % 10;

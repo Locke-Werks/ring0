@@ -1,6 +1,7 @@
 #include "snapshot.h"
 #include "ntapi.h"
 #include "intern.h"
+#include "history.h"
 #include <stdint.h>
 
 /* Snapshot arena pool. Four is enough cushion: the UI frame holds a snapshot
@@ -136,6 +137,13 @@ static void take_sample(void)
     fill_cpu_pct(snap, g_prev_for_cpu);
     g_prev_for_cpu = snap;
 
+    /* roll cpu samples into per-pid history for sparklines */
+    for (uint32_t i = 0; i < snap->n_processes; ++i) {
+        const process_t *p = &snap->processes[i];
+        history_update(p->pid, p->create_time, p->cpu_pct, snap->timestamp);
+    }
+    history_age(snap->timestamp, 60000);
+
     InterlockedExchangePointer((PVOID *)&g_current, snap);
     g_next = (g_next + 1) % POOL_N;
 
@@ -157,6 +165,7 @@ void snapshot_start(HWND notify, unsigned period_ms)
     if (g_thread) return;
     nt_init();
     intern_init();
+    history_init();
 
     g_notify    = notify;
     g_period_ms = period_ms ? period_ms : 250;
@@ -190,6 +199,7 @@ void snapshot_stop(void)
     g_scratch = NULL;
     g_current = NULL;
     g_prev_for_cpu = NULL;
+    history_destroy();
 }
 
 const snapshot_t *snapshot_current(void)
