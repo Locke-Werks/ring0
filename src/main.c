@@ -180,8 +180,18 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         int top = 0, row = 0;
         render_get_data_layout(&top, &row);
-        if (row > 0 && y >= top)
-            select_index(hwnd, render_get_scroll() + (y - top) / row);
+        if (row > 0 && y >= top) {
+            int row_idx = render_get_scroll() + (y - top) / row;
+            select_index(hwnd, row_idx);
+            /* Ctrl+click in tree mode toggles collapse for that row */
+            if (render_tree_mode() && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                const snapshot_t *s = snapshot_current();
+                if (s && row_idx >= 0 && row_idx < (int)s->n_processes) {
+                    render_tree_toggle_collapse(s->processes[row_idx].pid);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
+        }
         SetFocus(hwnd);
         return 0;
     }
@@ -237,6 +247,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             if (wp == 'D') {
                 render_toggle_diff();
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            if (wp == 'G') {
+                render_toggle_tree();
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }

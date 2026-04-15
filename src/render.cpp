@@ -50,6 +50,85 @@ static int                    g_view_back;          /* 0 = live */
 static int                    g_paused;
 static float                  g_scrubber_y;
 static int                    g_diff_back = -1;     /* baseline back-index, -1 inactive */
+static int                    g_tree_mode;
+/* Per-pid collapse state for tree view. Linear array — typical user collapses
+   only a handful of subtrees so a hash isn't worth the complexity. */
+static unsigned               g_collapsed[256];
+static int                    g_n_collapsed;
+
+static int is_collapsed(unsigned pid)
+{
+    for (int i = 0; i < g_n_collapsed; ++i) if (g_collapsed[i] == pid) return 1;
+    return 0;
+}
+
+extern "C" void render_tree_toggle_collapse(unsigned pid)
+{
+    for (int i = 0; i < g_n_collapsed; ++i) {
+        if (g_collapsed[i] == pid) {
+            g_collapsed[i] = g_collapsed[--g_n_collapsed];
+            return;
+        }
+    }
+    if (g_n_collapsed < 256) g_collapsed[g_n_collapsed++] = pid;
+}
+
+extern "C" void render_toggle_tree(void) { g_tree_mode = !g_tree_mode; }
+extern "C" int  render_tree_mode(void)   { return g_tree_mode; }
+
+/* Tree view buffer — built each frame from the current snapshot. */
+struct tree_node {
+    uint16_t snap_idx;
+    uint8_t  depth;
+    uint8_t  has_children;
+};
+static struct tree_node g_tree[1024];
+static int              g_tree_n;
+
+static int find_pid_in_snap(const snapshot_t *s, unsigned pid)
+{
+    for (uint32_t i = 0; i < s->n_processes; ++i)
+        if (s->processes[i].pid == pid) return (int)i;
+    return -1;
+}
+
+static void emit_subtree(const snapshot_t *s, uint32_t idx, int depth)
+{
+    if (g_tree_n >= 1024) return;
+    if (depth > 32) return;        /* cycle guard */
+
+    unsigned my_pid = s->processes[idx].pid;
+    int      has    = 0;
+    for (uint32_t i = 0; i < s->n_processes; ++i) {
+        if (s->processes[i].ppid == my_pid && s->processes[i].pid != my_pid) {
+            has = 1; break;
+        }
+    }
+
+    g_tree[g_tree_n].snap_idx     = (uint16_t)idx;
+    g_tree[g_tree_n].depth        = (uint8_t)depth;
+    g_tree[g_tree_n].has_children = (uint8_t)has;
+    ++g_tree_n;
+
+    if (is_collapsed(my_pid)) return;
+
+    for (uint32_t i = 0; i < s->n_processes; ++i) {
+        if (s->processes[i].ppid == my_pid && s->processes[i].pid != my_pid)
+            emit_subtree(s, i, depth + 1);
+    }
+}
+
+static void build_tree(const snapshot_t *s)
+{
+    g_tree_n = 0;
+    if (!s) return;
+    for (uint32_t i = 0; i < s->n_processes; ++i) {
+        unsigned ppid = s->processes[i].ppid;
+        if (ppid == 0 || find_pid_in_snap(s, ppid) < 0) {
+            emit_subtree(s, i, 0);
+        }
+    }
+}
 
 /* module-list cache — refreshed only when the selected pid or tab changes so
    we don't pay the toolhelp cost per frame. */
@@ -815,15 +894,31 @@ extern "C" void render_frame(const snapshot_t *snap)
     filter_parse(g_filter_len > 0 ? g_filter_text : L"", &q);
 
     uint32_t n = 0;
-    for (uint32_t i = 0; i < snap->n_processes && n < 1024; ++i) {
-        const process_t *pp = &snap->processes[i];
-        const wchar_t *name = intern_get(pp->image_name);
-        if (g_scope == 1 && pp->session_id == 0) continue;   /* user only */
-        if (g_scope == 2 && pp->session_id != 0) continue;   /* system only */
-        if (!filter_query_match(&q, pp->pid, pp->session_id, name)) continue;
-        g_sort_idx[n++] = i;
+    if (g_tree_mode) {
+        /* Tree mode bypasses sort and uses parent-child order. Filter still
+           applies — non-matching nodes are hidden but we keep their ancestors
+           visible if we wanted; for now, simple per-row filter. */
+        build_tree(snap);
+        for (int t = 0; t < g_tree_n && n < 1024; ++t) {
+            uint32_t i = g_tree[t].snap_idx;
+            const process_t *pp = &snap->processes[i];
+            const wchar_t *name = intern_get(pp->image_name);
+            if (g_scope == 1 && pp->session_id == 0) continue;
+            if (g_scope == 2 && pp->session_id != 0) continue;
+            if (!filter_query_match(&q, pp->pid, pp->session_id, name)) continue;
+            g_sort_idx[n++] = ((uint32_t)t << 20) | i;   /* pack tree index in high bits */
+        }
+    } else {
+        for (uint32_t i = 0; i < snap->n_processes && n < 1024; ++i) {
+            const process_t *pp = &snap->processes[i];
+            const wchar_t *name = intern_get(pp->image_name);
+            if (g_scope == 1 && pp->session_id == 0) continue;   /* user only */
+            if (g_scope == 2 && pp->session_id != 0) continue;   /* system only */
+            if (!filter_query_match(&q, pp->pid, pp->session_id, name)) continue;
+            g_sort_idx[n++] = i;
+        }
+        if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
     }
-    if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
 
     /* diff baseline lookup */
     const snapshot_t *baseline = (g_diff_back >= 0) ? snapshot_at(g_diff_back) : NULL;
@@ -831,7 +926,11 @@ extern "C" void render_frame(const snapshot_t *snap)
 
     for (uint32_t i = start; i < n; ++i) {
         if (y + row_h > scrubber_top) break;
-        const process_t *p = &snap->processes[g_sort_idx[i]];
+        uint32_t packed = g_sort_idx[i];
+        uint32_t snap_i = g_tree_mode ? (packed & 0xFFFFFu) : packed;
+        int      depth  = g_tree_mode ? (int)(packed >> 20) : 0;
+        (void)depth;     /* used below for indent */
+        const process_t *p = &snap->processes[snap_i];
         int len;
 
         int is_new = 0;
@@ -954,8 +1053,29 @@ extern "C" void render_frame(const snapshot_t *snap)
 
         const wchar_t *name = intern_get(p->image_name);
         if (!name) name = L"<unknown>";
-        draw_cell(g_fmt_data, name, lstrlenW(name),
-                  xs[COL_NAME], ws[COL_NAME], y, row_h, false);
+        if (g_tree_mode) {
+            /* prefix with depth-indent + disclosure glyph */
+            wchar_t ibuf[300];
+            int t = (int)(packed >> 20);
+            int tdepth = g_tree[t].depth;
+            int has_kids = g_tree[t].has_children;
+            int collapsed = is_collapsed(p->pid);
+            int indent = tdepth;
+            if (indent > 16) indent = 16;
+            int ilen = 0;
+            for (int k = 0; k < indent; ++k) {
+                ibuf[ilen++] = L' '; ibuf[ilen++] = L' ';
+            }
+            const wchar_t *gly = has_kids ? (collapsed ? L"+ " : L"- ") : L"  ";
+            ibuf[ilen++] = gly[0]; ibuf[ilen++] = gly[1];
+            const wchar_t *src = name;
+            while (*src && ilen < 299) ibuf[ilen++] = *src++;
+            ibuf[ilen] = 0;
+            draw_cell(g_fmt_data, ibuf, ilen, xs[COL_NAME], ws[COL_NAME], y, row_h, false);
+        } else {
+            draw_cell(g_fmt_data, name, lstrlenW(name),
+                      xs[COL_NAME], ws[COL_NAME], y, row_h, false);
+        }
 
         y += row_h;
     }

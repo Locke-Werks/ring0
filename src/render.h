@@ -63,6 +63,13 @@ int  render_diff_active(void);
 /* Stack tab: capture button hit-test. */
 int  render_hit_capture_btn(int x, int y);
 
+/* Process tree mode (Ctrl+G). When on, rows are reordered as a parent-child
+   tree with disclosure prefixes; tree_toggle_collapse flips a pid's collapse
+   state. */
+void render_toggle_tree(void);
+int  render_tree_mode(void);
+void render_tree_toggle_collapse(unsigned pid);
+
 /* Stack frames pushed in by stack.c after a capture. */
 typedef struct {
     unsigned long long addr;
