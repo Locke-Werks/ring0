@@ -20,6 +20,8 @@ static unsigned               g_w, g_h;
 static BOOL                   g_transparent;
 static unsigned               g_selected_pid;
 static int                    g_data_top_y, g_data_row_h;
+static int                    g_scroll_rows;
+static int                    g_visible_rows;
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -134,6 +136,10 @@ extern "C" void render_get_data_layout(int *top_y, int *row_h)
     if (row_h) *row_h = g_data_row_h;
 }
 
+extern "C" void render_set_scroll(int rows) { g_scroll_rows = rows < 0 ? 0 : rows; }
+extern "C" int  render_get_scroll(void)     { return g_scroll_rows; }
+extern "C" int  render_get_visible_rows(void) { return g_visible_rows; }
+
 extern "C" void render_resize(unsigned w, unsigned h)
 {
     g_w = w; g_h = h;
@@ -204,10 +210,17 @@ extern "C" void render_frame(const snapshot_t *snap)
 
     /* data rows in cascadia */
     float y = top + header_h + 4.0f;
-    g_data_top_y = (int)y;
-    g_data_row_h = (int)row_h;
+    g_data_top_y   = (int)y;
+    g_data_row_h   = (int)row_h;
+    g_visible_rows = (int)(((float)g_h - y) / row_h);
 
-    for (uint32_t i = 0; i < snap->n_processes; ++i) {
+    /* clamp scroll so we never blank the grid past the end */
+    int max_scroll = (int)snap->n_processes - g_visible_rows;
+    if (max_scroll < 0) max_scroll = 0;
+    if (g_scroll_rows > max_scroll) g_scroll_rows = max_scroll;
+    uint32_t start = (uint32_t)g_scroll_rows;
+
+    for (uint32_t i = start; i < snap->n_processes; ++i) {
         if (y + row_h > (float)g_h) break;
         const process_t *p = &snap->processes[i];
         int len;

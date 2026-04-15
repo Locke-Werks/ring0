@@ -97,9 +97,21 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         render_get_data_layout(&top, &row);
         if (row > 0) {
             int y = (short)HIWORD(lp);
-            if (y >= top) select_index(hwnd, (y - top) / row);
+            if (y >= top)
+                select_index(hwnd, render_get_scroll() + (y - top) / row);
         }
         SetFocus(hwnd);
+        return 0;
+    }
+
+    case WM_MOUSEWHEEL: {
+        int delta = (short)HIWORD(wp);
+        UINT lines = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        if (lines == (UINT)-1) lines = 3;     /* "scroll one screen at a time" */
+        int rows = -delta * (int)lines / WHEEL_DELTA;
+        render_set_scroll(render_get_scroll() + rows);
+        InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
 

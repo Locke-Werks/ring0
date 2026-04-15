@@ -22,6 +22,11 @@ void render_set_selected(unsigned pid);
 /* Layout introspection for hit testing in the message handler. */
 void render_get_data_layout(int *top_y, int *row_h);
 
+/* Scroll offset in whole rows. Render clamps internally. */
+void render_set_scroll(int rows);
+int  render_get_scroll(void);
+int  render_get_visible_rows(void);
+
 #ifdef __cplusplus
 }
 #endif
