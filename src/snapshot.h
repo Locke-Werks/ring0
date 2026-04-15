@@ -46,6 +46,11 @@ typedef struct {
     uint32_t   agg_gpu_pct;
     uint64_t   agg_disk_bps;
     uint64_t   agg_net_bps;
+    /* per-logical-core utilisation (0..100). Capped at 64 cores; if the
+       machine has more, only the first 64 are reported. */
+    uint8_t    cpu_core_count;
+    uint8_t    _pad2[3];
+    uint8_t    cpu_core_pct[64];
     process_t *processes;     /* flat array in the same arena */
 } snapshot_t;
 

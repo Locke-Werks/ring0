@@ -24,6 +24,44 @@ static HWND              g_notify;
 static unsigned          g_period_ms;
 static unsigned          g_num_cores;
 
+/* Per-core perf history for delta calculations. */
+static LARGE_INTEGER     g_prev_idle[64];
+static LARGE_INTEGER     g_prev_kern[64];
+static LARGE_INTEGER     g_prev_user[64];
+static int               g_have_core_prev;
+
+static void fill_per_core(snapshot_t *cur)
+{
+    SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_R0 info[64];
+    ULONG ret = 0;
+    if (!nt_qsi) return;
+    NTSTATUS st = nt_qsi(SystemProcessorPerformanceInformation,
+                         info, sizeof info, &ret);
+    if (st != 0) return;
+    int n = (int)(ret / sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_R0));
+    if (n > 64) n = 64;
+    cur->cpu_core_count = (uint8_t)n;
+
+    for (int i = 0; i < n; ++i) {
+        if (g_have_core_prev) {
+            uint64_t didle = (uint64_t)(info[i].IdleTime.QuadPart  - g_prev_idle[i].QuadPart);
+            uint64_t dkern = (uint64_t)(info[i].KernelTime.QuadPart - g_prev_kern[i].QuadPart);
+            uint64_t duser = (uint64_t)(info[i].UserTime.QuadPart  - g_prev_user[i].QuadPart);
+            uint64_t total = dkern + duser;          /* KernelTime includes idle */
+            uint64_t busy  = total > didle ? total - didle : 0;
+            uint64_t pct   = total > 0 ? (busy * 100 / total) : 0;
+            if (pct > 100) pct = 100;
+            cur->cpu_core_pct[i] = (uint8_t)pct;
+        } else {
+            cur->cpu_core_pct[i] = 0;
+        }
+        g_prev_idle[i] = info[i].IdleTime;
+        g_prev_kern[i] = info[i].KernelTime;
+        g_prev_user[i] = info[i].UserTime;
+    }
+    g_have_core_prev = 1;
+}
+
 /* Per-pid image-path cache. The exe path is invariant for the life of a PID,
    so resolving it once via QueryFullProcessImageNameW saves N OpenProcess calls
    per sample. Key is (pid, create_time) to handle PID reuse. */
@@ -261,6 +299,7 @@ static void take_sample(void)
     if (!snap) return;
 
     fill_deltas(snap, g_prev_for_cpu);
+    fill_per_core(snap);
     g_prev_for_cpu = snap;
 
     /* roll cpu samples into per-pid history for sparklines */

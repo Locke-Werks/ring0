@@ -904,14 +904,44 @@ extern "C" void render_frame(const snapshot_t *snap)
         }
     }
 
-    /* non-process views: placeholder content for now, then bail */
+    /* non-process views */
     if (g_view != VIEW_PROCESSES) {
-        g_brush->SetColor(to_d2d(th->foreground, 0.55f));
-        g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        D2D1_RECT_F r = D2D1::RectF(40.0f, top + 20.0f,
-                                    g_w_dips - 40.0f, top + 60.0f);
-        g_rt->DrawText(L"\u2014 view not yet wired \u2014", 21,
-                       g_fmt_chrome, r, g_brush);
+        if (g_view == VIEW_CPU && snap) {
+            /* per-core meter grid */
+            int cn = snap->cpu_core_count;
+            if (cn > 0) {
+                const float meter_w = 110.0f, meter_h = 56.0f;
+                const float gx = 24.0f, gy = top + 8.0f;
+                const int   cols = 8;
+                wchar_t lbl[32];
+                for (int c = 0; c < cn; ++c) {
+                    int row = c / cols, col = c % cols;
+                    float mx = gx + col * (meter_w + 8.0f);
+                    float my = gy + row * (meter_h + 12.0f);
+                    /* meter background */
+                    g_brush->SetColor(to_d2d(th->subtle, 0.30f));
+                    g_rt->FillRectangle(D2D1::RectF(mx, my, mx + meter_w, my + meter_h), g_brush);
+                    /* fill bar */
+                    float pct = snap->cpu_core_pct[c] / 100.0f;
+                    g_brush->SetColor(to_d2d(th->accent, 0.65f));
+                    g_rt->FillRectangle(D2D1::RectF(mx, my + meter_h - pct * meter_h,
+                                                    mx + meter_w, my + meter_h), g_brush);
+                    /* label */
+                    g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+                    int n2 = wsprintfW(lbl, L"core %d  %u%%", c, snap->cpu_core_pct[c]);
+                    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    g_rt->DrawText(lbl, n2, g_fmt_chrome,
+                        D2D1::RectF(mx + 8.0f, my + 4.0f, mx + meter_w, my + 24.0f), g_brush);
+                }
+            }
+        } else {
+            g_brush->SetColor(to_d2d(th->foreground, 0.55f));
+            g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            D2D1_RECT_F r = D2D1::RectF(40.0f, top + 20.0f,
+                                        g_w_dips - 40.0f, top + 60.0f);
+            g_rt->DrawText(L"\u2014 view not yet wired \u2014", 21,
+                           g_fmt_chrome, r, g_brush);
+        }
         /* still draw the scrubber */
         g_scrubber_y = g_h_dips - SCRUBBER_H;
         draw_scrubber(th, 0.0f, g_scrubber_y, g_w_dips, SCRUBBER_H);

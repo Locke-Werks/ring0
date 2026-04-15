@@ -11,6 +11,19 @@
 #define SystemProcessInformation 5
 #endif
 
+#ifndef SystemProcessorPerformanceInformation
+#define SystemProcessorPerformanceInformation 8
+#endif
+
+typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_R0 {
+    LARGE_INTEGER IdleTime;
+    LARGE_INTEGER KernelTime;     /* includes IdleTime */
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER DpcTime;
+    LARGE_INTEGER InterruptTime;
+    ULONG         InterruptCount;
+} SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_R0;
+
 typedef struct _SYSTEM_THREAD_INFORMATION_R0 {
     LARGE_INTEGER KernelTime;
     LARGE_INTEGER UserTime;
