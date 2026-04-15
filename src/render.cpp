@@ -15,6 +15,7 @@ static inline WORD swap16(WORD v) { return (WORD)((v >> 8) | (v << 8)); }
 #include "intern.h"
 #include "history.h"
 #include "filter.h"
+#include "trust.h"
 
 static ID2D1Factory          *g_d2d        = nullptr;
 static IDWriteFactory        *g_dw         = nullptr;
@@ -31,7 +32,7 @@ static int                    g_data_top_y, g_data_row_h;
 static int                    g_scroll_rows;
 static int                    g_visible_rows;
 static int                    g_header_top, g_header_h;
-static float                  g_col_xs[8], g_col_ws[8];      /* cached from last frame */
+static float                  g_col_xs[16], g_col_ws[16];    /* sized > COL_COUNT to avoid OOB */
 static int                    g_sort_col = -1;               /* -1 = NtQSI order */
 static int                    g_sort_desc = 1;
 static uint32_t               g_sort_idx[1024];
@@ -173,7 +174,7 @@ struct Col {
     bool           right_align;
 };
 
-enum { COL_PID, COL_CPU, COL_MEM, COL_DISK, COL_NET, COL_THR, COL_HND, COL_NAME, COL_COUNT };
+enum { COL_PID, COL_CPU, COL_MEM, COL_DISK, COL_NET, COL_THR, COL_HND, COL_TRUST, COL_NAME, COL_COUNT };
 
 static const Col g_cols[COL_COUNT] = {
     { L"PID",    70,  true  },
@@ -183,6 +184,7 @@ static const Col g_cols[COL_COUNT] = {
     { L"NET/s",  80,  true  },
     { L"THR",    50,  true  },
     { L"HND",    60,  true  },
+    { L"TRUST",  44,  false },
     { L"IMAGE",  -1,  false },
 };
 
@@ -478,8 +480,9 @@ static int cmp_proc(const process_t *a, const process_t *b, int col)
                           (a->working_set > b->working_set ? 1 : 0);
     case COL_DISK: return (int)(a->disk_bps - b->disk_bps);
     case COL_NET:  return (int)(a->net_bps  - b->net_bps);
-    case COL_THR:  return (int)a->thread_count - (int)b->thread_count;
-    case COL_HND:  return (int)a->handle_count - (int)b->handle_count;
+    case COL_THR:   return (int)a->thread_count - (int)b->thread_count;
+    case COL_HND:   return (int)a->handle_count - (int)b->handle_count;
+    case COL_TRUST: return (int)trust_query(a->image_path) - (int)trust_query(b->image_path);
     case COL_NAME: {
         const wchar_t *na = intern_get(a->image_name);
         const wchar_t *nb = intern_get(b->image_name);
@@ -697,6 +700,31 @@ extern "C" void render_frame(const snapshot_t *snap)
 
         len = fmt_uint(buf, p->handle_count);
         draw_cell(g_fmt_data, buf, len, xs[COL_HND], ws[COL_HND], y, row_h, true);
+
+        /* trust glyph + color */
+        uint8_t ts = trust_query(p->image_path);
+        const wchar_t *glyph = L"\u00B7";
+        D2D1_COLOR_F tc = to_d2d(th->subtle, 0.85f);
+        switch (ts) {
+        case TRUST_SIGNED:
+            glyph = L"\u2713";
+            tc.r = 0.43f; tc.g = 0.71f; tc.b = 0.43f; tc.a = 1.0f;
+            break;
+        case TRUST_UNSIGNED:
+            glyph = L"\u26A0";
+            tc.r = 0.86f; tc.g = 0.71f; tc.b = 0.35f; tc.a = 1.0f;
+            break;
+        case TRUST_BAD:
+            glyph = L"\u2717";
+            tc.r = 0.86f; tc.g = 0.39f; tc.b = 0.39f; tc.a = 1.0f;
+            break;
+        }
+        g_brush->SetColor(tc);
+        D2D1_RECT_F tr = D2D1::RectF(xs[COL_TRUST], y,
+                                     xs[COL_TRUST] + ws[COL_TRUST], y + row_h);
+        g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        g_rt->DrawText(glyph, lstrlenW(glyph), g_fmt_chrome, tr, g_brush);
+        g_brush->SetColor(to_d2d(th->foreground, 1.0f));
 
         const wchar_t *name = intern_get(p->image_name);
         if (!name) name = L"<unknown>";
