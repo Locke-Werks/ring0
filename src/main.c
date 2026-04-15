@@ -28,7 +28,27 @@
 #define DWMSBT_MAINWINDOW               2
 #endif
 
-static BOOL g_mica;
+static BOOL     g_mica;
+static unsigned g_selected_pid;
+
+static int find_pid_index(const snapshot_t *s, unsigned pid)
+{
+    if (!s) return -1;
+    for (uint32_t i = 0; i < s->n_processes; ++i)
+        if (s->processes[i].pid == pid) return (int)i;
+    return -1;
+}
+
+static void select_index(HWND hwnd, int idx)
+{
+    const snapshot_t *s = snapshot_current();
+    if (!s || s->n_processes == 0) return;
+    if (idx < 0) idx = 0;
+    if (idx >= (int)s->n_processes) idx = (int)s->n_processes - 1;
+    g_selected_pid = s->processes[idx].pid;
+    render_set_selected(g_selected_pid);
+    InvalidateRect(hwnd, NULL, FALSE);
+}
 
 static void apply_dwm(HWND hwnd)
 {
@@ -71,6 +91,36 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             InvalidateRect(hwnd, NULL, TRUE);
         }
         break;
+
+    case WM_LBUTTONDOWN: {
+        int top = 0, row = 0;
+        render_get_data_layout(&top, &row);
+        if (row > 0) {
+            int y = (short)HIWORD(lp);
+            if (y >= top) select_index(hwnd, (y - top) / row);
+        }
+        SetFocus(hwnd);
+        return 0;
+    }
+
+    case WM_KEYDOWN: {
+        const snapshot_t *s = snapshot_current();
+        int cur = find_pid_index(s, g_selected_pid);
+        switch (wp) {
+        case VK_DOWN:  select_index(hwnd, cur + 1);          return 0;
+        case VK_UP:    select_index(hwnd, cur < 0 ? 0 : cur - 1); return 0;
+        case VK_NEXT:  select_index(hwnd, cur + 20);         return 0;
+        case VK_PRIOR: select_index(hwnd, cur - 20);         return 0;
+        case VK_HOME:  select_index(hwnd, 0);                return 0;
+        case VK_END:   if (s) select_index(hwnd, (int)s->n_processes - 1); return 0;
+        case VK_ESCAPE:
+            g_selected_pid = 0;
+            render_set_selected(0);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        break;
+    }
 
     case WM_DESTROY:
         snapshot_stop();

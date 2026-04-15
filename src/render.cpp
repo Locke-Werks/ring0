@@ -18,6 +18,8 @@ static ID2D1SolidColorBrush  *g_brush      = nullptr;   /* recolored per draw */
 static HWND                   g_hwnd       = nullptr;
 static unsigned               g_w, g_h;
 static BOOL                   g_transparent;
+static unsigned               g_selected_pid;
+static int                    g_data_top_y, g_data_row_h;
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -124,6 +126,14 @@ extern "C" void render_init(HWND hwnd)
 
 extern "C" void render_set_transparent(BOOL t) { g_transparent = t; }
 
+extern "C" void render_set_selected(unsigned pid) { g_selected_pid = pid; }
+
+extern "C" void render_get_data_layout(int *top_y, int *row_h)
+{
+    if (top_y) *top_y = g_data_top_y;
+    if (row_h) *row_h = g_data_row_h;
+}
+
 extern "C" void render_resize(unsigned w, unsigned h)
 {
     g_w = w; g_h = h;
@@ -193,13 +203,27 @@ extern "C" void render_frame(const snapshot_t *snap)
     if (!snap) { g_rt->EndDraw(); return; }
 
     /* data rows in cascadia */
-    g_brush->SetColor(to_d2d(th->foreground, 1.0f));
     float y = top + header_h + 4.0f;
+    g_data_top_y = (int)y;
+    g_data_row_h = (int)row_h;
+
     for (uint32_t i = 0; i < snap->n_processes; ++i) {
         if (y + row_h > (float)g_h) break;
         const process_t *p = &snap->processes[i];
         int len;
 
+        if (p->pid == g_selected_pid) {
+            /* subtle accent fill across the row */
+            g_brush->SetColor(to_d2d(th->accent, 0.10f));
+            D2D1_RECT_F sel = D2D1::RectF(0.0f, y, (float)g_w, y + row_h);
+            g_rt->FillRectangle(sel, g_brush);
+            /* 2px accent left border */
+            g_brush->SetColor(to_d2d(th->accent, 1.0f));
+            D2D1_RECT_F bar = D2D1::RectF(0.0f, y, 2.0f, y + row_h);
+            g_rt->FillRectangle(bar, g_brush);
+        }
+
+        g_brush->SetColor(to_d2d(th->foreground, 1.0f));
         len = fmt_uint(buf, p->pid);
         draw_cell(g_fmt_data, buf, len, xs[COL_PID], ws[COL_PID], y, row_h, true);
 

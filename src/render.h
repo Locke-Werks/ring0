@@ -16,6 +16,12 @@ void render_destroy(void);
    backdrop shows through; otherwise we paint the theme background color. */
 void render_set_transparent(BOOL t);
 
+/* Selection highlight by PID — survives snapshot churn. */
+void render_set_selected(unsigned pid);
+
+/* Layout introspection for hit testing in the message handler. */
+void render_get_data_layout(int *top_y, int *row_h);
+
 #ifdef __cplusplus
 }
 #endif
