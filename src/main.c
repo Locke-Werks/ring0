@@ -97,10 +97,22 @@ static int run(void)
     wc.lpszClassName = L"ring0";
     if (!RegisterClassExW(&wc)) return 1;
 
+    /* CW_USEDEFAULT for x silently forces width/height to system defaults, which
+       gave us a 480x320 window. Compute an explicit size + position from the
+       primary monitor's work area instead. */
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int  sw = wa.right - wa.left, sh = wa.bottom - wa.top;
+    int  w  = (sw * 4) / 5, h = (sh * 4) / 5;
+    if (w > 1600) w = 1600;
+    if (h > 1000) h = 1000;
+    int  x  = wa.left + (sw - w) / 2;
+    int  y  = wa.top  + (sh - h) / 2;
+
     HWND hwnd = CreateWindowExW(
         0, L"ring0", L"ring0",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
+        x, y, w, h,
         NULL, NULL, hi, NULL);
     if (!hwnd) return 1;
 
