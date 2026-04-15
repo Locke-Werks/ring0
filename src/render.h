@@ -55,6 +55,11 @@ int  render_hit_scrubber(int x, int y);   /* returns view_back for click x, or -
 void render_toggle_paused(void);
 int  render_is_paused(void);
 
+/* Snapshot diff. Pin current view as baseline; subsequent renders highlight
+   newly-appeared processes. Calling again clears the diff. */
+void render_toggle_diff(void);
+int  render_diff_active(void);
+
 #ifdef __cplusplus
 }
 #endif

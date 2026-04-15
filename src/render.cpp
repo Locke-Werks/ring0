@@ -49,6 +49,7 @@ static float                  g_tab_x[2], g_tab_y, g_tab_w, g_tab_h;
 static int                    g_view_back;          /* 0 = live */
 static int                    g_paused;
 static float                  g_scrubber_y;
+static int                    g_diff_back = -1;     /* baseline back-index, -1 inactive */
 
 /* module-list cache — refreshed only when the selected pid or tab changes so
    we don't pay the toolhelp cost per frame. */
@@ -398,6 +399,14 @@ extern "C" int render_get_view_back(void) { return g_view_back; }
 extern "C" void render_toggle_paused(void) { g_paused = !g_paused; if (!g_paused) g_view_back = 0; }
 extern "C" int  render_is_paused(void)     { return g_paused || g_view_back > 0; }
 
+extern "C" void render_toggle_diff(void)
+{
+    if (g_diff_back >= 0) { g_diff_back = -1; return; }
+    /* baseline is whatever the current view is showing */
+    g_diff_back = g_view_back;
+}
+extern "C" int render_diff_active(void) { return g_diff_back >= 0; }
+
 extern "C" int render_hit_scrubber(int x, int y)
 {
     if ((float)y < g_scrubber_y || (float)y >= g_scrubber_y + SCRUBBER_H) return -1;
@@ -720,10 +729,37 @@ extern "C" void render_frame(const snapshot_t *snap)
     }
     if (g_sort_col >= 0) sort_indices(g_sort_idx, (int)n, snap->processes);
 
+    /* diff baseline lookup */
+    const snapshot_t *baseline = (g_diff_back >= 0) ? snapshot_at(g_diff_back) : NULL;
+    if (baseline == snap) baseline = NULL;     /* viewing the baseline = no diff */
+
     for (uint32_t i = start; i < n; ++i) {
         if (y + row_h > scrubber_top) break;
         const process_t *p = &snap->processes[g_sort_idx[i]];
         int len;
+
+        int is_new = 0;
+        if (baseline) {
+            is_new = 1;
+            for (uint32_t j = 0; j < baseline->n_processes; ++j) {
+                if (baseline->processes[j].pid == p->pid &&
+                    baseline->processes[j].create_time == p->create_time) {
+                    is_new = 0;
+                    break;
+                }
+            }
+        }
+
+        if (is_new) {
+            /* muted green tint for newly-arrived processes */
+            D2D1_COLOR_F nf = { 0.30f, 0.55f, 0.30f, 0.18f };
+            g_brush->SetColor(nf);
+            D2D1_RECT_F r = D2D1::RectF(0.0f, y, grid_w, y + row_h);
+            g_rt->FillRectangle(r, g_brush);
+            D2D1_COLOR_F nb = { 0.43f, 0.71f, 0.43f, 1.0f };
+            g_brush->SetColor(nb);
+            g_rt->FillRectangle(D2D1::RectF(0.0f, y, 2.0f, y + row_h), g_brush);
+        }
 
         if (p->pid == g_selected_pid) {
             /* subtle accent fill across the row */
