@@ -52,11 +52,11 @@ void filter_selftest(void)
     if (filter_score(L"xyz",    L"chrome.exe")   >= 0)      die();
     if (filter_score(L"rome",   L"chrome.exe")   <= 0)      die();
 
-    /* boundary bonus — "exe" against "ring0.exe" should score higher than
-       the same letters arbitrarily in the middle of another string */
-    int sa = filter_score(L"exe", L"ring0.exe");
-    int sb = filter_score(L"exe", L"experiment");
-    if (sa <= sb)                                           die();
+    /* boundary/start bonus — same pattern should score higher when the first
+       match lands at a word boundary vs mid-word. */
+    int s_boundary = filter_score(L"chrome", L"chrome.exe");
+    int s_midword  = filter_score(L"chrome", L"unchromed.exe");
+    if (s_boundary <= s_midword)                            die();
 
     /* case-insensitive */
     if (filter_score(L"CHROME", L"chrome.exe") <= 0)        die();

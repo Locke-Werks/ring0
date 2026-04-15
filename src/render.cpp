@@ -29,6 +29,9 @@ static int                    g_sort_col = -1;               /* -1 = NtQSI order
 static int                    g_sort_desc = 1;
 static uint32_t               g_sort_idx[1024];
 static int                    g_density = 1;                 /* 0 compact, 1 normal, 2 comfy */
+static wchar_t                g_filter_text[256];
+static int                    g_filter_len;
+static int                    g_filter_caret;
 
 /* Column descriptor — width <= 0 means "take the rest." */
 struct Col {
@@ -169,6 +172,84 @@ extern "C" void render_cycle_density(int delta)
     if (g_density > 2) g_density = 2;
 }
 
+extern "C" void render_set_filter(const wchar_t *text, int caret)
+{
+    g_filter_len = 0;
+    if (text) {
+        while (text[g_filter_len] && g_filter_len < 255) {
+            g_filter_text[g_filter_len] = text[g_filter_len];
+            ++g_filter_len;
+        }
+    }
+    g_filter_text[g_filter_len] = 0;
+    if (caret < 0) caret = 0;
+    if (caret > g_filter_len) caret = g_filter_len;
+    g_filter_caret = caret;
+}
+
+static void draw_command_bar(const theme_t *th, float width, float height)
+{
+    /* subtle backdrop */
+    g_brush->SetColor(to_d2d(th->subtle, 0.20f));
+    D2D1_RECT_F bg = D2D1::RectF(0, 0, width, height);
+    g_rt->FillRectangle(bg, g_brush);
+
+    const float input_x = 14.0f;
+    const float input_y = 10.0f;
+    const float input_w = width - 28.0f;
+    const float input_h = height - 20.0f;
+
+    /* rounded rect input */
+    D2D1_ROUNDED_RECT rr;
+    rr.rect    = D2D1::RectF(input_x, input_y, input_x + input_w, input_y + input_h);
+    rr.radiusX = 8.0f;
+    rr.radiusY = 8.0f;
+    g_brush->SetColor(to_d2d(th->background, 0.45f));
+    g_rt->FillRoundedRectangle(rr, g_brush);
+
+    /* 1px subtle border */
+    g_brush->SetColor(to_d2d(th->subtle, 0.6f));
+    g_rt->DrawRoundedRectangle(rr, g_brush, 1.0f);
+
+    const float text_x = input_x + 14.0f;
+    const float text_w = input_w - 28.0f;
+
+    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    D2D1_RECT_F tr = D2D1::RectF(text_x, input_y, text_x + text_w, input_y + input_h);
+
+    if (g_filter_len == 0) {
+        const wchar_t *ph = L"type to filter \u2014 pid:N session:N";
+        g_brush->SetColor(to_d2d(th->foreground, 0.35f));
+        g_rt->DrawText(ph, lstrlenW(ph), g_fmt_chrome, tr, g_brush);
+    } else {
+        g_brush->SetColor(to_d2d(th->foreground, 1.0f));
+        g_rt->DrawText(g_filter_text, (UINT32)g_filter_len, g_fmt_chrome, tr, g_brush);
+    }
+
+    /* caret — a 1 DIP vertical bar. blinks at ~2 Hz off GetTickCount. */
+    if ((GetTickCount() / 500u) % 2 == 0) {
+        /* measure the substring up to caret to place the blinker accurately */
+        float caret_x = text_x;
+        if (g_filter_caret > 0) {
+            IDWriteTextLayout *layout = nullptr;
+            g_dw->CreateTextLayout(g_filter_text, (UINT32)g_filter_caret,
+                                   g_fmt_chrome, text_w, input_h, &layout);
+            if (layout) {
+                DWRITE_HIT_TEST_METRICS m{};
+                float x = 0, y = 0;
+                layout->HitTestTextPosition(
+                    (UINT32)g_filter_caret, FALSE, &x, &y, &m);
+                caret_x = text_x + x;
+                layout->Release();
+            }
+        }
+        g_brush->SetColor(to_d2d(th->accent, 0.95f));
+        D2D1_RECT_F caret = D2D1::RectF(caret_x, input_y + 6.0f,
+                                        caret_x + 1.0f, input_y + input_h - 6.0f);
+        g_rt->FillRectangle(caret, g_brush);
+    }
+}
+
 extern "C" void render_toggle_sort(int col)
 {
     if (col < 0 || col >= COL_COUNT) return;
@@ -269,7 +350,11 @@ extern "C" void render_frame(const snapshot_t *snap)
     static const float density_header[3] = { 26.0f, 28.0f, 32.0f };
     const float row_h    = density_row[g_density];
     const float header_h = density_header[g_density];
-    const float top      = 12.0f;
+    const float bar_h    = 48.0f;
+    const float top      = bar_h + 12.0f;
+
+    draw_command_bar(th, (float)g_w, bar_h);
+
     g_header_top = (int)top;
     g_header_h   = (int)header_h;
     wchar_t buf[256];

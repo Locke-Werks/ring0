@@ -35,6 +35,9 @@ void render_toggle_sort(int col);     /* same col flips dir, new col resets to d
 /* Density: -1 compact, 0 normal, +1 comfortable. delta is signed step. */
 void render_cycle_density(int delta);
 
+/* Command bar: filter text. Render makes a copy. caret is character offset. */
+void render_set_filter(const wchar_t *text, int caret);
+
 #ifdef __cplusplus
 }
 #endif
