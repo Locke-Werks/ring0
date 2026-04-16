@@ -62,6 +62,48 @@ static const float            VIEW_TAB_BAR_H = 36.0f;
 static unsigned               g_collapsed[256];
 static int                    g_n_collapsed;
 
+/* Universal row hit-test — populated each frame as rows are drawn in any
+   view. Walked by WM_RBUTTONUP so the context menu can target any process
+   row regardless of view. */
+struct row_hit { float x0, y0, x1, y1; unsigned pid; };
+#define ROW_HITS_MAX 1024
+static struct row_hit g_row_hits[ROW_HITS_MAX];
+static int            g_row_hits_n;
+
+static inline void record_row(float x0, float y0, float x1, float y1, unsigned pid)
+{
+    if (g_row_hits_n >= ROW_HITS_MAX) return;
+    g_row_hits[g_row_hits_n].x0 = x0;
+    g_row_hits[g_row_hits_n].y0 = y0;
+    g_row_hits[g_row_hits_n].x1 = x1;
+    g_row_hits[g_row_hits_n].y1 = y1;
+    g_row_hits[g_row_hits_n].pid = pid;
+    ++g_row_hits_n;
+}
+
+extern "C" unsigned render_hit_proc_row(int x, int y)
+{
+    for (int i = 0; i < g_row_hits_n; ++i) {
+        if ((float)x >= g_row_hits[i].x0 && (float)x < g_row_hits[i].x1 &&
+            (float)y >= g_row_hits[i].y0 && (float)y < g_row_hits[i].y1)
+            return g_row_hits[i].pid;
+    }
+    return 0xFFFFFFFFu;
+}
+
+/* Smoothed per-device values to suppress 250ms-cadence flicker in the
+   disk/net strips. Updated once per frame inside their respective views. */
+static float g_disk_r_ema[PHYS_DISK_MAX];
+static float g_disk_w_ema[PHYS_DISK_MAX];
+static float g_net_in_ema[NETIF_MAX];
+static float g_net_out_ema[NETIF_MAX];
+
+static inline float ema_step(float prev, float cur)
+{
+    /* alpha=0.35 — visible response to bursts but smooths small jitter */
+    return prev * 0.65f + cur * 0.35f;
+}
+
 static int is_collapsed(unsigned pid)
 {
     for (int i = 0; i < g_n_collapsed; ++i) if (g_collapsed[i] == pid) return 1;
@@ -201,6 +243,197 @@ static void draw_inspector_body(const theme_t *th, float ix, float iy, float iw,
 /* Bottom strip showing aggregate cpu/disk/net over the snapshot ring. */
 static const float SCRUBBER_H_BASE = 56.0f;
 #define SCRUBBER_H (SCRUBBER_H_BASE * g_scale)
+
+/* Walk the snapshot ring (newest..oldest) and gather two parallel series.
+   `pick(s, &a, &b)` extracts the two values from a snapshot. The output
+   buffers are written oldest-first, with `*out_n` samples actually filled.
+   Caller passes max capacity in `cap`. */
+typedef void (*series_fn)(const snapshot_t *, uint64_t *, uint64_t *);
+static void gather_series(uint64_t *a, uint64_t *b, int *out_n, int cap, series_fn pick)
+{
+    int n = snapshot_count();
+    if (n > cap) n = cap;
+    *out_n = n;
+    for (int i = 0; i < n; ++i) {
+        const snapshot_t *s = snapshot_at((n - 1) - i);
+        uint64_t va = 0, vb = 0;
+        if (s) pick(s, &va, &vb);
+        a[i] = va;
+        b[i] = vb;
+    }
+}
+
+static void pick_disk(const snapshot_t *s, uint64_t *r, uint64_t *w)
+{
+    *r = 0; *w = 0;
+    for (int i = 0; i < s->n_disks; ++i) {
+        *r += s->disks[i].read_bps;
+        *w += s->disks[i].write_bps;
+    }
+}
+
+static void pick_net(const snapshot_t *s, uint64_t *in_, uint64_t *out_)
+{
+    *in_ = 0; *out_ = 0;
+    for (int i = 0; i < s->n_ifaces; ++i) {
+        *in_  += s->ifaces[i].in_bps;
+        *out_ += s->ifaces[i].out_bps;
+    }
+}
+
+static void pick_gpu(const snapshot_t *s, uint64_t *g, uint64_t *unused)
+{
+    *g = s->agg_gpu_pct;     /* fixed point /10 */
+    *unused = 0;
+}
+
+/* Format a bytes/sec value into a compact label. */
+static int fmt_bps(wchar_t *buf, uint64_t bps)
+{
+    if (bps >= (uint64_t)1024 * 1024 * 1024)
+        return wsprintfW(buf, L"%u.%u GiB/s",
+            (unsigned)(bps / ((uint64_t)1024 * 1024 * 1024)),
+            (unsigned)((bps / (((uint64_t)1024 * 1024 * 1024) / 10)) % 10));
+    if (bps >= (uint64_t)10 * 1024 * 1024)
+        return wsprintfW(buf, L"%u MiB/s", (unsigned)(bps / (1024 * 1024)));
+    if (bps >= 1024)
+        return wsprintfW(buf, L"%u KiB/s", (unsigned)(bps / 1024));
+    return wsprintfW(buf, L"%u B/s", (unsigned)bps);
+}
+
+/* Two-series area+line graph. Series A is drawn on top of B with lighter fill;
+   both share the same vertical scale (max of both). Time axis runs left-to-right
+   with the most recent sample on the right. Useful for read/write, in/out, etc. */
+static void draw_dual_series(const theme_t *th,
+                             float gx, float gy, float gw, float gh,
+                             const uint64_t *sa, const uint64_t *sb, int n,
+                             uint64_t cur_a, uint64_t cur_b,
+                             const wchar_t *label_a, const wchar_t *label_b,
+                             int format_as_bps)
+{
+    /* backdrop + frame */
+    g_brush->SetColor(to_d2d(th->subtle, 0.18f));
+    g_rt->FillRectangle(D2D1::RectF(gx, gy, gx + gw, gy + gh), g_brush);
+    g_brush->SetColor(to_d2d(th->subtle, 0.55f));
+    g_rt->DrawRectangle(D2D1::RectF(gx + 0.5f, gy + 0.5f,
+                                    gx + gw - 0.5f, gy + gh - 0.5f),
+                        g_brush, 1.0f);
+
+    /* horizontal grid lines at 25/50/75% */
+    g_brush->SetColor(to_d2d(th->subtle, 0.30f));
+    for (int q = 1; q < 4; ++q) {
+        float ly = gy + (float)q * (gh / 4.0f);
+        g_rt->DrawLine(D2D1::Point2F(gx, ly), D2D1::Point2F(gx + gw, ly), g_brush, 1.0f);
+    }
+
+    if (n < 2) return;
+
+    /* find max for scaling */
+    uint64_t mx = 1;
+    for (int i = 0; i < n; ++i) {
+        if (sa && sa[i] > mx) mx = sa[i];
+        if (sb && sb[i] > mx) mx = sb[i];
+    }
+    if (mx < 8) mx = 8;
+
+    float dx = gw / (float)(n - 1);
+
+    /* draw series B (write/out) first as filled area + line */
+    if (sb) {
+        g_brush->SetColor(to_d2d(th->accent, 0.18f));
+        for (int i = 1; i < n; ++i) {
+            float x0 = gx + (float)(i - 1) * dx;
+            float x1 = gx + (float)i * dx;
+            float y0 = gy + gh - ((float)sb[i - 1] / (float)mx) * gh;
+            float y1 = gy + gh - ((float)sb[i]     / (float)mx) * gh;
+            /* trapezoid fill */
+            ID2D1PathGeometry *path = nullptr;
+            if (SUCCEEDED(g_d2d->CreatePathGeometry(&path)) && path) {
+                ID2D1GeometrySink *sink = nullptr;
+                if (SUCCEEDED(path->Open(&sink)) && sink) {
+                    sink->BeginFigure(D2D1::Point2F(x0, gy + gh), D2D1_FIGURE_BEGIN_FILLED);
+                    sink->AddLine(D2D1::Point2F(x0, y0));
+                    sink->AddLine(D2D1::Point2F(x1, y1));
+                    sink->AddLine(D2D1::Point2F(x1, gy + gh));
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+                    sink->Release();
+                    g_rt->FillGeometry(path, g_brush);
+                }
+                path->Release();
+            }
+        }
+        g_brush->SetColor(to_d2d(th->accent, 0.65f));
+        for (int i = 1; i < n; ++i) {
+            float x0 = gx + (float)(i - 1) * dx;
+            float x1 = gx + (float)i * dx;
+            float y0 = gy + gh - ((float)sb[i - 1] / (float)mx) * gh;
+            float y1 = gy + gh - ((float)sb[i]     / (float)mx) * gh;
+            g_rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), g_brush, 1.5f * g_scale);
+        }
+    }
+
+    /* series A (read/in) — bright line, no fill so B remains visible */
+    if (sa) {
+        g_brush->SetColor(to_d2d(th->accent, 1.0f));
+        for (int i = 1; i < n; ++i) {
+            float x0 = gx + (float)(i - 1) * dx;
+            float x1 = gx + (float)i * dx;
+            float y0 = gy + gh - ((float)sa[i - 1] / (float)mx) * gh;
+            float y1 = gy + gh - ((float)sa[i]     / (float)mx) * gh;
+            g_rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), g_brush, 2.0f * g_scale);
+        }
+    }
+
+    /* legend in top-left of the chart */
+    wchar_t buf[80];
+    int len;
+    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    float lx = gx + 12.0f * g_scale;
+    float ly = gy + 6.0f  * g_scale;
+    /* swatch A */
+    if (label_a) {
+        g_brush->SetColor(to_d2d(th->accent, 1.0f));
+        g_rt->FillRectangle(D2D1::RectF(lx, ly + 6.0f, lx + 10.0f, ly + 14.0f), g_brush);
+        g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+        if (format_as_bps) {
+            wchar_t v[24]; int vl = fmt_bps(v, cur_a); v[vl] = 0;
+            len = wsprintfW(buf, L"%s  %s", label_a, v);
+        } else {
+            len = wsprintfW(buf, L"%s  %u.%u%%", label_a,
+                (unsigned)(cur_a / 10), (unsigned)(cur_a % 10));
+        }
+        g_rt->DrawText(buf, len, g_fmt_chrome,
+            D2D1::RectF(lx + 14.0f, ly, gx + gw - 12.0f, ly + 22.0f * g_scale), g_brush);
+        ly += 20.0f * g_scale;
+    }
+    if (label_b) {
+        g_brush->SetColor(to_d2d(th->accent, 0.65f));
+        g_rt->FillRectangle(D2D1::RectF(lx, ly + 6.0f, lx + 10.0f, ly + 14.0f), g_brush);
+        g_brush->SetColor(to_d2d(th->foreground, 0.85f));
+        if (format_as_bps) {
+            wchar_t v[24]; int vl = fmt_bps(v, cur_b); v[vl] = 0;
+            len = wsprintfW(buf, L"%s  %s", label_b, v);
+        } else {
+            len = wsprintfW(buf, L"%s  %u.%u%%", label_b,
+                (unsigned)(cur_b / 10), (unsigned)(cur_b % 10));
+        }
+        g_rt->DrawText(buf, len, g_fmt_chrome,
+            D2D1::RectF(lx + 14.0f, ly, gx + gw - 12.0f, ly + 22.0f * g_scale), g_brush);
+    }
+
+    /* y-axis max in top-right */
+    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    g_brush->SetColor(to_d2d(th->foreground, 0.55f));
+    if (format_as_bps) {
+        wchar_t v[24]; int vl = fmt_bps(v, mx); v[vl] = 0;
+        len = wsprintfW(buf, L"max %s", v);
+    } else {
+        len = wsprintfW(buf, L"max %u%%", (unsigned)(mx / 10));
+    }
+    g_rt->DrawText(buf, len, g_fmt_chrome,
+        D2D1::RectF(gx, gy + 6.0f, gx + gw - 12.0f, gy + 22.0f * g_scale), g_brush);
+}
 
 static void draw_scrubber(const theme_t *th, float x, float y, float w, float h)
 {
@@ -879,6 +1112,8 @@ extern "C" void render_frame(const snapshot_t *snap)
     g_rt->BeginDraw();
     g_rt->Clear(clear);
 
+    g_row_hits_n = 0;    /* context-menu hit-test scratchpad, filled below */
+
     float grid_w = g_w_dips;
     if (g_inspector_open) grid_w -= INSPECTOR_W;
     if (grid_w < 200.0f)  grid_w = 200.0f;
@@ -1031,6 +1266,7 @@ extern "C" void render_frame(const snapshot_t *snap)
                 const wchar_t *name = intern_get(pp->image_name);
                 if (!name) name = L"<unknown>";
                 float row_w = bar_w * ((float)pp->working_set / (float)max_ws);
+                record_row(left_x, yy, g_w_dips - left_x, yy + 20.0f, pp->pid);
                 /* row bar */
                 g_brush->SetColor(to_d2d(th->accent, 0.30f));
                 g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w, yy + 18.0f), g_brush);
@@ -1049,40 +1285,67 @@ extern "C" void render_frame(const snapshot_t *snap)
             int n2;
 
             const wchar_t *headline = L"";
-            uint64_t total_bps = 0;
             int      mode_disk = (g_view == VIEW_DISK);
             int      mode_net  = (g_view == VIEW_NETWORK);
             int      mode_gpu  = (g_view == VIEW_GPU);
 
+            uint64_t cur_a = 0, cur_b = 0;
+            const wchar_t *label_a = L"", *label_b = L"";
+            int format_as_bps = 1;
+
             if (mode_disk) {
                 headline = L"system disk i/o";
-                /* prefer physical-disk wire-level bytes over the ETW per-process
-                   sum — ETW is silent when another trace session owns the kernel
-                   logger, but IOCTL_DISK_PERFORMANCE always reports. */
-                uint64_t wire = 0;
-                for (int di = 0; di < snap->n_disks; ++di)
-                    wire += (uint64_t)snap->disks[di].read_bps + snap->disks[di].write_bps;
-                total_bps = wire ? wire : snap->agg_disk_bps;
+                for (int di = 0; di < snap->n_disks; ++di) {
+                    cur_a += snap->disks[di].read_bps;
+                    cur_b += snap->disks[di].write_bps;
+                }
+                label_a = L"read"; label_b = L"write";
             }
             if (mode_net) {
                 headline = L"system network i/o";
-                uint64_t wire = 0;
-                for (int ni = 0; ni < snap->n_ifaces; ++ni)
-                    wire += (uint64_t)snap->ifaces[ni].in_bps + snap->ifaces[ni].out_bps;
-                total_bps = wire ? wire : snap->agg_net_bps;
+                for (int ni = 0; ni < snap->n_ifaces; ++ni) {
+                    cur_a += snap->ifaces[ni].in_bps;
+                    cur_b += snap->ifaces[ni].out_bps;
+                }
+                label_a = L"in"; label_b = L"out";
             }
-            if (mode_gpu)  { headline = L"gpu activity"; }
+            if (mode_gpu) {
+                headline = L"gpu activity";
+                cur_a = snap->agg_gpu_pct;
+                label_a = L"total"; label_b = NULL;
+                format_as_bps = 0;
+            }
 
             g_brush->SetColor(to_d2d(th->foreground, 0.95f));
             g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            n2 = wsprintfW(buf2, mode_gpu
-                ? L"%s  (sum %u%% across processes)"
-                : L"%s  %I64u KiB/s aggregate",
-                headline,
-                mode_gpu ? snap->agg_gpu_pct / 10 : total_bps / 1024);
+            if (mode_gpu) {
+                n2 = wsprintfW(buf2, L"%s  %u.%u%% aggregate",
+                    headline, (unsigned)(cur_a / 10), (unsigned)(cur_a % 10));
+            } else {
+                wchar_t v[24]; int vl = fmt_bps(v, cur_a + cur_b); v[vl] = 0;
+                n2 = wsprintfW(buf2, L"%s  %s aggregate", headline, v);
+            }
             g_rt->DrawText(buf2, n2, g_fmt_chrome,
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f * g_scale), g_brush);
-            yy += 36.0f * g_scale;
+            yy += 28.0f * g_scale;
+
+            /* time-series graph — last ~150 samples (~37s @ 250ms cadence) */
+            uint64_t sa[150], sb[150];
+            int hn = 0;
+            series_fn pick = mode_disk ? pick_disk : (mode_net ? pick_net : pick_gpu);
+            gather_series(sa, sb, &hn, 150, pick);
+
+            float gw = g_w_dips - left_x * 2.0f;
+            float gh = 160.0f * g_scale;
+            /* shrink the graph if the viewport is short to leave room for the
+               per-device strip and top-process list below */
+            float remaining = (g_h_dips - SCRUBBER_H) - yy - 220.0f * g_scale;
+            if (remaining < gh) gh = remaining;
+            if (gh < 80.0f * g_scale) gh = 80.0f * g_scale;
+            draw_dual_series(th, left_x, yy, gw, gh,
+                             sa, mode_gpu ? NULL : sb, hn,
+                             cur_a, cur_b, label_a, label_b, format_as_bps);
+            yy += gh + 16.0f * g_scale;
 
             /* per-adapter strip (network view only) */
             if (mode_net && snap->n_ifaces > 0) {
@@ -1094,9 +1357,18 @@ extern "C" void render_frame(const snapshot_t *snap)
                 g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f * g_scale), g_brush);
                 yy += 8.0f * g_scale;
 
-                uint64_t nmax = 1;
+                /* EMA per slot — smooths bar width without lying about the rate */
                 for (int ni = 0; ni < snap->n_ifaces; ++ni) {
-                    uint64_t v = (uint64_t)snap->ifaces[ni].in_bps + snap->ifaces[ni].out_bps;
+                    g_net_in_ema[ni]  = ema_step(g_net_in_ema[ni],  (float)snap->ifaces[ni].in_bps);
+                    g_net_out_ema[ni] = ema_step(g_net_out_ema[ni], (float)snap->ifaces[ni].out_bps);
+                }
+
+                /* normalise against link speed when known so we get a consistent
+                   "fraction of the pipe" feel; fall back to actual peak when the
+                   adapter doesn't report a speed */
+                float nmax = 1.0f;
+                for (int ni = 0; ni < snap->n_ifaces; ++ni) {
+                    float v = g_net_in_ema[ni] + g_net_out_ema[ni];
                     if (v > nmax) nmax = v;
                 }
 
@@ -1104,15 +1376,17 @@ extern "C" void render_frame(const snapshot_t *snap)
                 float row_h_n = 24.0f * g_scale;
                 for (int ni = 0; ni < snap->n_ifaces; ++ni) {
                     const net_if_t *ifc = &snap->ifaces[ni];
-                    uint64_t v = (uint64_t)ifc->in_bps + ifc->out_bps;
-                    float row_w = bar_w_n * ((float)v / (float)nmax);
+                    float v = g_net_in_ema[ni] + g_net_out_ema[ni];
+                    float row_w = bar_w_n * (v / nmax);
                     g_brush->SetColor(to_d2d(th->accent, ifc->up ? 0.30f : 0.12f));
                     g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                         yy + row_h_n - 3.0f * g_scale), g_brush);
                     g_brush->SetColor(to_d2d(th->foreground, ifc->up ? 0.95f : 0.55f));
                     n2 = wsprintfW(buf2,
                         L"%-40s  in %5u KiB/s   out %5u KiB/s   %s  %u Mb",
-                        ifc->name, ifc->in_bps / 1024, ifc->out_bps / 1024,
+                        ifc->name,
+                        (unsigned)(g_net_in_ema[ni]  / 1024.0f),
+                        (unsigned)(g_net_out_ema[ni] / 1024.0f),
                         ifc->up ? L"up" : L"--",
                         (unsigned)(ifc->link_speed / 1000000));
                     g_rt->DrawText(buf2, n2, g_fmt_data,
@@ -1133,10 +1407,14 @@ extern "C" void render_frame(const snapshot_t *snap)
                 g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f * g_scale), g_brush);
                 yy += 8.0f * g_scale;
 
-                /* find max across all disks for bar scaling */
-                uint64_t dmax = 1;
                 for (int di = 0; di < snap->n_disks; ++di) {
-                    uint64_t v = (uint64_t)snap->disks[di].read_bps + snap->disks[di].write_bps;
+                    g_disk_r_ema[di] = ema_step(g_disk_r_ema[di], (float)snap->disks[di].read_bps);
+                    g_disk_w_ema[di] = ema_step(g_disk_w_ema[di], (float)snap->disks[di].write_bps);
+                }
+
+                float dmax = 1.0f;
+                for (int di = 0; di < snap->n_disks; ++di) {
+                    float v = g_disk_r_ema[di] + g_disk_w_ema[di];
                     if (v > dmax) dmax = v;
                 }
 
@@ -1144,15 +1422,18 @@ extern "C" void render_frame(const snapshot_t *snap)
                 float row_h_d = 24.0f * g_scale;
                 for (int di = 0; di < snap->n_disks; ++di) {
                     const phys_disk_t *d = &snap->disks[di];
-                    uint64_t v = (uint64_t)d->read_bps + d->write_bps;
-                    float row_w = bar_w_d * ((float)v / (float)dmax);
+                    float v = g_disk_r_ema[di] + g_disk_w_ema[di];
+                    float row_w = bar_w_d * (v / dmax);
                     g_brush->SetColor(to_d2d(th->accent, 0.30f));
                     g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                         yy + row_h_d - 3.0f * g_scale), g_brush);
                     g_brush->SetColor(to_d2d(th->foreground, 0.95f));
                     n2 = wsprintfW(buf2,
                         L"%-14s  r %5u KiB/s   w %5u KiB/s   q %u",
-                        d->name, d->read_bps / 1024, d->write_bps / 1024, d->queue_depth);
+                        d->name,
+                        (unsigned)(g_disk_r_ema[di] / 1024.0f),
+                        (unsigned)(g_disk_w_ema[di] / 1024.0f),
+                        d->queue_depth);
                     g_rt->DrawText(buf2, n2, g_fmt_data,
                         D2D1::RectF(left_x + 6.0f * g_scale, yy,
                                     g_w_dips - left_x, yy + row_h_d), g_brush);
@@ -1203,6 +1484,7 @@ extern "C" void render_frame(const snapshot_t *snap)
                 const wchar_t *name = intern_get(pp->image_name);
                 if (!name) name = L"<unknown>";
                 float row_w = bar_w * ((float)v / (float)max_v);
+                record_row(left_x, yy, g_w_dips - left_x, yy + row_h_v, pp->pid);
                 g_brush->SetColor(to_d2d(th->accent, 0.30f));
                 g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                     yy + row_h_v - 2.0f * g_scale), g_brush);
@@ -1227,17 +1509,47 @@ extern "C" void render_frame(const snapshot_t *snap)
             float ih = (g_h_dips - SCRUBBER_H) - iy;
             draw_inspector_body(th, ix, iy, iw, ih, snap, 0 /* no backdrop */);
         } else if (g_view == VIEW_CPU && snap) {
-            /* per-core meter grid */
+            /* per-core meter grid — auto-size cols and meter dimensions to fit
+               the available viewport so all cores are always visible without
+               scrolling, regardless of window width or core count. */
             int cn = snap->cpu_core_count;
             if (cn > 0) {
-                const float meter_w = 140.0f * g_scale, meter_h = 72.0f * g_scale;
-                const float gx = 24.0f * g_scale, gy = top + 8.0f * g_scale;
-                const int   cols = 8;
+                const float pad     = 24.0f * g_scale;
+                const float hgap    = 8.0f  * g_scale;
+                const float vgap    = 14.0f * g_scale;
+                const float pref_w  = 160.0f * g_scale;
+                const float min_w   = 90.0f  * g_scale;
+                const float min_h   = 44.0f  * g_scale;
+                const float pref_h  = 80.0f  * g_scale;
+
+                float cpu_w = g_w_dips;
+                if (g_inspector_open) cpu_w -= INSPECTOR_W;
+                float gx = pad, gy = top + 8.0f * g_scale;
+                float avail_w = cpu_w - pad * 2.0f;
+                float avail_h = (g_h_dips - SCRUBBER_H) - gy - 8.0f * g_scale;
+
+                /* prefer ~pref_w wide; clamp to fit cn cores. */
+                int cols = (int)((avail_w + hgap) / (pref_w + hgap));
+                if (cols < 1) cols = 1;
+                if (cols > cn) cols = cn;
+
+                /* if rows wouldn't fit at pref_h, add columns until they do. */
+                int rows_needed = (cn + cols - 1) / cols;
+                while (rows_needed > 1 && cols < cn &&
+                       (rows_needed * (pref_h + vgap)) > avail_h) {
+                    ++cols;
+                    rows_needed = (cn + cols - 1) / cols;
+                }
+                float meter_w = ((avail_w + hgap) / (float)cols) - hgap;
+                if (meter_w < min_w) meter_w = min_w;
+                float meter_h = ((avail_h + vgap) / (float)rows_needed) - vgap;
+                if (meter_h > pref_h) meter_h = pref_h;
+                if (meter_h < min_h)  meter_h = min_h;
                 wchar_t lbl[32];
                 for (int c = 0; c < cn; ++c) {
                     int row = c / cols, col = c % cols;
-                    float mx = gx + col * (meter_w + 8.0f * g_scale);
-                    float my = gy + row * (meter_h + 14.0f * g_scale);
+                    float mx = gx + col * (meter_w + hgap);
+                    float my = gy + row * (meter_h + vgap);
                     /* meter background */
                     g_brush->SetColor(to_d2d(th->subtle, 0.30f));
                     g_rt->FillRectangle(D2D1::RectF(mx, my, mx + meter_w, my + meter_h), g_brush);
@@ -1401,6 +1713,8 @@ extern "C" void render_frame(const snapshot_t *snap)
             g_brush->SetColor(nb);
             g_rt->FillRectangle(D2D1::RectF(0.0f, y, 2.0f, y + row_h), g_brush);
         }
+
+        record_row(0.0f, y, grid_w, y + row_h, p->pid);
 
         if (p->pid == g_selected_pid) {
             /* subtle accent fill across the row */

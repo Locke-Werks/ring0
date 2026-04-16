@@ -94,6 +94,11 @@ typedef struct {
 } stack_frame_t;
 void render_set_stack_frames(const stack_frame_t *frames, int n, unsigned pid);
 
+/* Universal per-row hit-test. Returns the pid under (x,y) across any view
+   that renders process rows (main grid, memory top-N, disk/net/gpu top-N,
+   forensic). 0xFFFFFFFFu if nothing. Populated during render_frame. */
+unsigned render_hit_proc_row(int x, int y);
+
 #ifdef __cplusplus
 }
 #endif

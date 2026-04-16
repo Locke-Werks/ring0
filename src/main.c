@@ -3,6 +3,7 @@
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include "theme.h"
 #include "arena.h"
 #include "ringbuf.h"
@@ -14,6 +15,12 @@
 #include "trust.h"
 
 int stack_capture(unsigned pid);
+
+#define IDM_END_TASK        1001
+#define IDM_END_TREE        1002
+#define IDM_SEND_FORENSIC   1003
+#define IDM_COPY_PID        1004
+#define IDM_OPEN_LOCATION   1005
 
 /* dwmapi constants that only exist on recent Windows SDKs. Declared unconditionally
    so the build works on older SDKs; DWM silently rejects them on pre-Win11 22H2. */
@@ -93,6 +100,110 @@ static void select_index(HWND hwnd, int idx)
     g_selected_pid = s->processes[idx].pid;
     render_set_selected(g_selected_pid);
     InvalidateRect(hwnd, NULL, FALSE);
+}
+
+static unsigned g_menu_pid;     /* pid the popup menu was opened against */
+
+static void end_process_by_pid(unsigned pid)
+{
+    if (pid == 0 || pid == 4) return;     /* refuse Idle and System */
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (!h) return;
+    TerminateProcess(h, 1);
+    CloseHandle(h);
+}
+
+static void end_process_tree(unsigned root_pid)
+{
+    if (root_pid == 0 || root_pid == 4) return;
+    const snapshot_t *s = snapshot_current();
+    if (!s) { end_process_by_pid(root_pid); return; }
+
+    /* BFS: collect descendants by walking ppid each step. Cap at 512 victims;
+       a runaway tree this big is unlikely outside fork-bomb territory. */
+    unsigned victims[512];
+    int      vn = 0;
+    victims[vn++] = root_pid;
+    for (int rd = 0; rd < vn; ++rd) {
+        unsigned parent = victims[rd];
+        for (uint32_t i = 0; i < s->n_processes && vn < 512; ++i) {
+            if (s->processes[i].ppid != parent) continue;
+            if (s->processes[i].pid  == parent) continue;
+            unsigned cpid = s->processes[i].pid;
+            int dup = 0;
+            for (int k = 0; k < vn; ++k) if (victims[k] == cpid) { dup = 1; break; }
+            if (!dup) victims[vn++] = cpid;
+        }
+    }
+    /* terminate children before parent so the parent's exit doesn't strand
+       grandchildren before we process them */
+    for (int i = vn - 1; i >= 0; --i) end_process_by_pid(victims[i]);
+}
+
+static void copy_pid_to_clipboard(HWND hwnd, unsigned pid)
+{
+    wchar_t buf[16];
+    int n = wsprintfW(buf, L"%u", pid);
+    if (!OpenClipboard(hwnd)) return;
+    EmptyClipboard();
+    HGLOBAL hm = GlobalAlloc(GMEM_MOVEABLE, ((SIZE_T)n + 1) * sizeof(wchar_t));
+    if (hm) {
+        wchar_t *m = (wchar_t *)GlobalLock(hm);
+        if (m) {
+            for (int i = 0; i <= n; ++i) m[i] = buf[i];
+            GlobalUnlock(hm);
+            SetClipboardData(CF_UNICODETEXT, hm);
+        } else {
+            GlobalFree(hm);
+        }
+    }
+    CloseClipboard();
+}
+
+static void open_process_location(unsigned pid)
+{
+    const snapshot_t *s = snapshot_current();
+    if (!s) return;
+    for (uint32_t i = 0; i < s->n_processes; ++i) {
+        if (s->processes[i].pid != pid) continue;
+        const wchar_t *path = intern_get(s->processes[i].image_path);
+        if (!path || !*path) return;
+        wchar_t cmd[1024];
+        int len = 0;
+        const wchar_t *prefix = L"/select,\"";
+        while (*prefix && len < 1023) cmd[len++] = *prefix++;
+        const wchar_t *p = path;
+        while (*p && len < 1022) cmd[len++] = *p++;
+        cmd[len++] = L'"';
+        cmd[len]   = 0;
+        ShellExecuteW(NULL, L"open", L"explorer.exe", cmd, NULL, SW_SHOWNORMAL);
+        return;
+    }
+}
+
+static void show_context_menu(HWND hwnd, int sx, int sy, unsigned pid)
+{
+    if (pid == 0xFFFFFFFFu) return;
+    g_menu_pid = pid;
+    g_selected_pid = pid;
+    render_set_selected(pid);
+    InvalidateRect(hwnd, NULL, FALSE);
+
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+
+    wchar_t lbl[64];
+    wsprintfW(lbl, L"end task  (pid %u)", pid);
+    AppendMenuW(m, MF_STRING, IDM_END_TASK,      lbl);
+    AppendMenuW(m, MF_STRING, IDM_END_TREE,      L"end process tree");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, IDM_SEND_FORENSIC, L"send to forensic tab");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, IDM_COPY_PID,      L"copy pid");
+    AppendMenuW(m, MF_STRING, IDM_OPEN_LOCATION, L"open file location");
+
+    TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_LEFTALIGN, sx, sy, 0, hwnd, NULL);
+    DestroyMenu(m);
 }
 
 static void apply_dwm(HWND hwnd)
@@ -216,6 +327,38 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:
         if (GetCapture() == hwnd) ReleaseCapture();
         return 0;
+
+    case WM_RBUTTONUP: {
+        int x = (short)LOWORD(lp);
+        int y = (short)HIWORD(lp);
+        unsigned pid = render_hit_proc_row(x, y);
+        if (pid == 0xFFFFFFFFu) return 0;
+        POINT pt = { x, y };
+        ClientToScreen(hwnd, &pt);
+        show_context_menu(hwnd, pt.x, pt.y, pid);
+        return 0;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDM_END_TASK:
+            end_process_by_pid(g_menu_pid);
+            return 0;
+        case IDM_END_TREE:
+            end_process_tree(g_menu_pid);
+            return 0;
+        case IDM_SEND_FORENSIC:
+            render_set_view(VIEW_FORENSIC);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        case IDM_COPY_PID:
+            copy_pid_to_clipboard(hwnd, g_menu_pid);
+            return 0;
+        case IDM_OPEN_LOCATION:
+            open_process_location(g_menu_pid);
+            return 0;
+        }
+        break;
 
     case WM_MOUSEWHEEL: {
         int delta = (short)HIWORD(wp);
