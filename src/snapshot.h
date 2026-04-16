@@ -52,7 +52,9 @@ typedef struct {
        machine has more, only the first 64 are reported. */
     uint8_t    cpu_core_count;
     uint8_t    _pad2[3];
-    uint8_t    cpu_core_pct[64];
+    uint8_t    cpu_core_pct[64];       /* total busy */
+    uint8_t    cpu_core_user_pct[64];
+    uint8_t    cpu_core_kern_pct[64];  /* kernel, excluding idle */
     uint8_t    n_disks;
     uint8_t    n_ifaces;
     uint8_t    _pad3[6];

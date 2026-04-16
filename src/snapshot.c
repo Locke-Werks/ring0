@@ -51,11 +51,20 @@ static void fill_per_core(snapshot_t *cur)
             uint64_t duser = (uint64_t)(info[i].UserTime.QuadPart  - g_prev_user[i].QuadPart);
             uint64_t total = dkern + duser;          /* KernelTime includes idle */
             uint64_t busy  = total > didle ? total - didle : 0;
-            uint64_t pct   = total > 0 ? (busy * 100 / total) : 0;
-            if (pct > 100) pct = 100;
-            cur->cpu_core_pct[i] = (uint8_t)pct;
+            uint64_t kbusy = dkern > didle ? dkern - didle : 0;
+            uint64_t user_pct = total > 0 ? (duser * 100 / total) : 0;
+            uint64_t kern_pct = total > 0 ? (kbusy * 100 / total) : 0;
+            uint64_t pct      = total > 0 ? (busy  * 100 / total) : 0;
+            if (pct      > 100) pct      = 100;
+            if (user_pct > 100) user_pct = 100;
+            if (kern_pct > 100) kern_pct = 100;
+            cur->cpu_core_pct[i]      = (uint8_t)pct;
+            cur->cpu_core_user_pct[i] = (uint8_t)user_pct;
+            cur->cpu_core_kern_pct[i] = (uint8_t)kern_pct;
         } else {
-            cur->cpu_core_pct[i] = 0;
+            cur->cpu_core_pct[i]      = 0;
+            cur->cpu_core_user_pct[i] = 0;
+            cur->cpu_core_kern_pct[i] = 0;
         }
         g_prev_idle[i] = info[i].IdleTime;
         g_prev_kern[i] = info[i].KernelTime;
