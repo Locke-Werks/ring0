@@ -967,12 +967,22 @@ extern "C" void render_frame(const snapshot_t *snap)
 
             /* commit + kernel pools + page faults */
             g_brush->SetColor(to_d2d(th->foreground, 0.85f));
-            n2 = wsprintfW(buf2, L"commit:    %I64u MB used / %I64u MB limit",
+            uint32_t commit_pct = m.commit_limit > 0
+                ? (uint32_t)((m.commit_used * 100) / m.commit_limit) : 0;
+            n2 = wsprintfW(buf2, L"commit:    %I64u MB used / %I64u MB limit  (%u%%)",
                 m.commit_used  / (1024 * 1024),
-                m.commit_limit / (1024 * 1024));
+                m.commit_limit / (1024 * 1024),
+                commit_pct);
             g_rt->DrawText(buf2, n2, g_fmt_chrome,
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
             yy += 26.0f * g_scale;
+
+            g_brush->SetColor(to_d2d(th->subtle, 0.30f));
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + bar_w, yy + 14.0f * g_scale), g_brush);
+            g_brush->SetColor(to_d2d(th->accent, 0.55f));
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy,
+                left_x + bar_w * (commit_pct / 100.0f), yy + 14.0f * g_scale), g_brush);
+            yy += 24.0f * g_scale;
 
             n2 = wsprintfW(buf2, L"paged pool:     %I64u MB       non-paged pool:  %I64u MB",
                 m.paged_pool     / (1024 * 1024),
