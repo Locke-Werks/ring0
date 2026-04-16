@@ -32,6 +32,39 @@ static LARGE_INTEGER     g_prev_kern[64];
 static LARGE_INTEGER     g_prev_user[64];
 static int               g_have_core_prev;
 
+static ULONG  g_page_size;
+static ULONG  g_prev_page_faults;
+static uint64_t g_prev_faults_ms;
+
+static void fill_mem_stats(snapshot_t *cur)
+{
+    MEMORYSTATUSEX ms = { sizeof ms };
+    if (GlobalMemoryStatusEx(&ms)) {
+        cur->mem.phys_total   = ms.ullTotalPhys;
+        cur->mem.phys_avail   = ms.ullAvailPhys;
+        cur->mem.commit_limit = ms.ullTotalPageFile;
+        cur->mem.commit_used  = ms.ullTotalPageFile > ms.ullAvailPageFile
+                                ? ms.ullTotalPageFile - ms.ullAvailPageFile : 0;
+        cur->mem.mem_load_pct = ms.dwMemoryLoad;
+    }
+
+    if (!nt_qsi || g_page_size == 0) return;
+    SYSTEM_PERFORMANCE_INFORMATION_R0 spi;
+    ULONG ret = 0;
+    if (nt_qsi(SystemPerformanceInformation, &spi, sizeof spi, &ret) != 0) return;
+
+    cur->mem.paged_pool     = (uint64_t)spi.PagedPoolPages    * g_page_size;
+    cur->mem.non_paged_pool = (uint64_t)spi.NonPagedPoolPages * g_page_size;
+
+    if (g_prev_faults_ms > 0 && cur->timestamp > g_prev_faults_ms) {
+        uint32_t dfaults = spi.PageFaultCount - g_prev_page_faults;
+        uint64_t dms     = cur->timestamp - g_prev_faults_ms;
+        cur->mem.page_faults_per_sec = (uint32_t)(((uint64_t)dfaults * 1000) / dms);
+    }
+    g_prev_page_faults = spi.PageFaultCount;
+    g_prev_faults_ms   = cur->timestamp;
+}
+
 static void fill_per_core(snapshot_t *cur)
 {
     SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_R0 info[64];
@@ -311,6 +344,7 @@ static void take_sample(void)
 
     fill_deltas(snap, g_prev_for_cpu);
     fill_per_core(snap);
+    fill_mem_stats(snap);
     snap->n_disks  = (uint8_t)physdisk_sample(snap->disks,  PHYS_DISK_MAX, snap->timestamp);
     snap->n_ifaces = (uint8_t)netif_sample(snap->ifaces, NETIF_MAX, snap->timestamp);
     g_prev_for_cpu = snap;
@@ -357,6 +391,7 @@ void snapshot_start(HWND notify, unsigned period_ms)
     GetSystemInfo(&si);
     g_num_cores = si.dwNumberOfProcessors;
     if (g_num_cores == 0) g_num_cores = 1;
+    g_page_size = si.dwPageSize;
 
     gpu_init();
 

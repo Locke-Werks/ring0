@@ -937,55 +937,64 @@ extern "C" void render_frame(const snapshot_t *snap)
     /* non-process views */
     if (g_view != VIEW_PROCESSES) {
         if (g_view == VIEW_MEMORY && snap) {
-            MEMORYSTATUSEX m;
-            m.dwLength = sizeof m;
-            GlobalMemoryStatusEx(&m);
+            const mem_stats_t &m = snap->mem;
 
-            const float left_x = 24.0f;
-            float yy = top + 12.0f;
+            const float left_x = 24.0f * g_scale;
+            float yy = top + 12.0f * g_scale;
 
-            wchar_t buf2[128];
+            wchar_t buf2[160];
             int n2;
 
             /* physical memory headline */
             g_brush->SetColor(to_d2d(th->foreground, 0.95f));
             g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             n2 = wsprintfW(buf2, L"physical:  %I64u MB used / %I64u MB total  (%u%% in use)",
-                (m.ullTotalPhys - m.ullAvailPhys) / (1024 * 1024),
-                m.ullTotalPhys / (1024 * 1024),
-                m.dwMemoryLoad);
+                (m.phys_total - m.phys_avail) / (1024 * 1024),
+                m.phys_total / (1024 * 1024),
+                m.mem_load_pct);
             g_rt->DrawText(buf2, n2, g_fmt_chrome,
-                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f), g_brush);
-            yy += 28.0f;
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f * g_scale), g_brush);
+            yy += 28.0f * g_scale;
 
             /* big used bar */
             float bar_w = g_w_dips - left_x * 2.0f;
             g_brush->SetColor(to_d2d(th->subtle, 0.30f));
-            g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + bar_w, yy + 18.0f), g_brush);
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + bar_w, yy + 18.0f * g_scale), g_brush);
             g_brush->SetColor(to_d2d(th->accent, 0.65f));
             g_rt->FillRectangle(D2D1::RectF(left_x, yy,
-                left_x + bar_w * (m.dwMemoryLoad / 100.0f), yy + 18.0f), g_brush);
-            yy += 28.0f;
+                left_x + bar_w * (m.mem_load_pct / 100.0f), yy + 18.0f * g_scale), g_brush);
+            yy += 28.0f * g_scale;
 
-            /* commit + virtual */
+            /* commit + kernel pools + page faults */
             g_brush->SetColor(to_d2d(th->foreground, 0.85f));
-            n2 = wsprintfW(buf2, L"commit:    %I64u MB used / %I64u MB total",
-                (m.ullTotalPageFile - m.ullAvailPageFile) / (1024 * 1024),
-                m.ullTotalPageFile / (1024 * 1024));
+            n2 = wsprintfW(buf2, L"commit:    %I64u MB used / %I64u MB limit",
+                m.commit_used  / (1024 * 1024),
+                m.commit_limit / (1024 * 1024));
             g_rt->DrawText(buf2, n2, g_fmt_chrome,
-                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f), g_brush);
-            yy += 28.0f;
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+            yy += 26.0f * g_scale;
+
+            n2 = wsprintfW(buf2, L"paged pool:     %I64u MB       non-paged pool:  %I64u MB",
+                m.paged_pool     / (1024 * 1024),
+                m.non_paged_pool / (1024 * 1024));
+            g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+            yy += 26.0f * g_scale;
+
+            n2 = wsprintfW(buf2, L"page faults:   %u /s", m.page_faults_per_sec);
+            g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+            yy += 32.0f * g_scale;
 
             /* top mem consumers */
-            yy += 8.0f;
             g_brush->SetColor(to_d2d(th->foreground, 0.65f));
             g_rt->DrawText(L"top working set", 15, g_fmt_chrome,
-                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f), g_brush);
-            yy += 24.0f;
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+            yy += 24.0f * g_scale;
             /* hairline */
             g_brush->SetColor(to_d2d(th->subtle, 0.5f));
-            g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f), g_brush);
-            yy += 6.0f;
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f * g_scale), g_brush);
+            yy += 6.0f * g_scale;
 
             /* sort by working_set desc — local copy of indices */
             uint32_t mem_idx[1024];

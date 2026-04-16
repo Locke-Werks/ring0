@@ -40,9 +40,21 @@ typedef struct {
 } process_t;
 
 typedef struct {
+    uint64_t phys_total;
+    uint64_t phys_avail;
+    uint64_t commit_limit;
+    uint64_t commit_used;
+    uint64_t paged_pool;
+    uint64_t non_paged_pool;
+    uint32_t page_faults_per_sec;
+    uint32_t mem_load_pct;
+} mem_stats_t;
+
+typedef struct {
     uint64_t   timestamp;     /* GetTickCount64 at sample */
     uint32_t   n_processes;
     uint32_t   _pad;
+    mem_stats_t mem;
     /* aggregate roll-ups for the time scrubber strip — sum across processes */
     uint32_t   agg_cpu_pct;   /* fixed point, value/10 = percent */
     uint32_t   agg_gpu_pct;

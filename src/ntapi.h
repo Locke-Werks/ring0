@@ -15,6 +15,47 @@
 #define SystemProcessorPerformanceInformation 8
 #endif
 
+#ifndef SystemPerformanceInformation
+#define SystemPerformanceInformation 2
+#endif
+
+/* Partial layout — we read fields up to NonPagedPoolPages. Stable since XP. */
+typedef struct _SYSTEM_PERFORMANCE_INFORMATION_R0 {
+    LARGE_INTEGER IdleProcessTime;
+    LARGE_INTEGER IoReadTransferCount;
+    LARGE_INTEGER IoWriteTransferCount;
+    LARGE_INTEGER IoOtherTransferCount;
+    ULONG IoReadOperationCount;
+    ULONG IoWriteOperationCount;
+    ULONG IoOtherOperationCount;
+    ULONG AvailablePages;
+    ULONG CommittedPages;
+    ULONG CommitLimit;
+    ULONG PeakCommitment;
+    ULONG PageFaultCount;
+    ULONG CopyOnWriteCount;
+    ULONG TransitionCount;
+    ULONG CacheTransitionCount;
+    ULONG DemandZeroCount;
+    ULONG PageReadCount;
+    ULONG PageReadIoCount;
+    ULONG CacheReadCount;
+    ULONG CacheIoCount;
+    ULONG DirtyPagesWriteCount;
+    ULONG DirtyWriteIoCount;
+    ULONG MappedPagesWriteCount;
+    ULONG MappedWriteIoCount;
+    ULONG PagedPoolPages;
+    ULONG NonPagedPoolPages;
+    ULONG PagedPoolAllocs;
+    ULONG PagedPoolFrees;
+    ULONG NonPagedPoolAllocs;
+    ULONG NonPagedPoolFrees;
+    ULONG FreeSystemPtes;
+    /* more fields follow, irrelevant */
+    BYTE  _tail[512];
+} SYSTEM_PERFORMANCE_INFORMATION_R0;
+
 typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_R0 {
     LARGE_INTEGER IdleTime;
     LARGE_INTEGER KernelTime;     /* includes IdleTime */
