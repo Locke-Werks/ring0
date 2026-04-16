@@ -318,9 +318,10 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        render_set_hover(x, y);
         if (wp & MK_LBUTTON) {
-            int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
             int back = render_hit_scrubber(x, y);
             if (back >= 0) {
                 render_set_view_back(back);
@@ -328,6 +329,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
         return 0;
+    }
 
     case WM_LBUTTONUP:
         if (GetCapture() == hwnd) ReleaseCapture();

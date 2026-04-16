@@ -85,6 +85,7 @@ enum {
 void render_set_view(int v);
 int  render_get_view(void);
 int  render_hit_view_tab(int x, int y);   /* -1 if not on a top tab */
+void render_set_hover(int x, int y);      /* update mouse position for hover highlight */
 
 /* Stack frames pushed in by stack.c after a capture. */
 typedef struct {

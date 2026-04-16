@@ -22,6 +22,7 @@ static IDWriteFactory        *g_dw         = nullptr;
 static ID2D1HwndRenderTarget *g_rt         = nullptr;
 static IDWriteTextFormat     *g_fmt_data   = nullptr;   /* cascadia mono, tabular */
 static IDWriteTextFormat     *g_fmt_chrome = nullptr;   /* segoe ui variable, header/chrome */
+static IDWriteTextFormat     *g_fmt_heading = nullptr;  /* larger bold, section titles */
 static ID2D1SolidColorBrush  *g_brush      = nullptr;   /* recolored per draw */
 static HWND                   g_hwnd       = nullptr;
 static unsigned               g_w, g_h;           /* physical pixels (surface) */
@@ -56,6 +57,8 @@ static float                  g_scrubber_y;
 static int                    g_diff_back = -1;     /* baseline back-index, -1 inactive */
 static int                    g_tree_mode;
 static int                    g_view = VIEW_PROCESSES;
+static int                    g_hover_x = -1, g_hover_y = -1;
+static unsigned               g_hover_pid = 0xFFFFFFFFu;
 static float                  g_view_tab_x[VIEW_COUNT], g_view_tab_y, g_view_tab_w, g_view_tab_h;
 static const float            VIEW_TAB_BAR_H = 36.0f;
 /* Per-pid collapse state for tree view. Linear array — typical user collapses
@@ -136,6 +139,7 @@ extern "C" void render_toggle_tree(void) { g_tree_mode = !g_tree_mode; }
 extern "C" int  render_tree_mode(void)   { return g_tree_mode; }
 
 extern "C" void render_set_view(int v) { if (v >= 0 && v < VIEW_COUNT) g_view = v; }
+extern "C" void render_set_hover(int x, int y) { g_hover_x = x; g_hover_y = y; }
 extern "C" int  render_get_view(void) { return g_view; }
 extern "C" int  render_hit_view_tab(int x, int y)
 {
@@ -248,6 +252,75 @@ static const wchar_t *basename(const wchar_t *path)
 }
 
 static D2D1_COLOR_F to_d2d(COLORREF c, float a);   /* fwd decl */
+
+/* Per-view accent palette. Each resource view gets its own color identity so
+   the user builds a subconscious map: blue = cpu, purple = memory, amber = disk,
+   green = network, pink = gpu. The processes and forensic views inherit the
+   system accent. Colours chosen for readable contrast on both dark and light
+   backgrounds. */
+struct view_accent {
+    D2D1_COLOR_F line;       /* primary graph line, bright */
+    D2D1_COLOR_F fill;       /* area fill, low alpha */
+    D2D1_COLOR_F line2;      /* secondary series line (dimmer) */
+    D2D1_COLOR_F fill2;      /* secondary area fill */
+    D2D1_COLOR_F bar;        /* meter / bar fills */
+    D2D1_COLOR_F glow;       /* tab underline / emphasis */
+};
+
+static view_accent make_va(float r, float g, float b)
+{
+    view_accent v;
+    v.line  = { r, g, b, 1.0f };
+    v.fill  = { r, g, b, 0.22f };
+    v.line2 = { r * 0.7f, g * 0.7f, b * 0.7f, 0.85f };
+    v.fill2 = { r * 0.7f, g * 0.7f, b * 0.7f, 0.15f };
+    v.bar   = { r, g, b, 0.55f };
+    v.glow  = { r, g, b, 0.90f };
+    return v;
+}
+
+/* Lazily built after theme_load so accent-derived views pick up system color */
+static view_accent g_va[VIEW_COUNT];
+static int         g_va_ready;
+
+static void build_view_accents(const theme_t *th)
+{
+    float ar = GetRValue(th->accent) / 255.0f;
+    float ag = GetGValue(th->accent) / 255.0f;
+    float ab = GetBValue(th->accent) / 255.0f;
+    g_va[VIEW_PROCESSES] = make_va(ar, ag, ab);
+    g_va[VIEW_CPU]       = make_va(0.31f, 0.76f, 0.97f);   /* sky blue */
+    g_va[VIEW_MEMORY]    = make_va(0.74f, 0.48f, 0.85f);   /* lavender */
+    g_va[VIEW_DISK]      = make_va(1.00f, 0.72f, 0.30f);   /* amber */
+    g_va[VIEW_NETWORK]   = make_va(0.40f, 0.80f, 0.47f);   /* mint green */
+    g_va[VIEW_GPU]       = make_va(0.94f, 0.38f, 0.57f);   /* rose pink */
+    g_va[VIEW_FORENSIC]  = make_va(0.56f, 0.65f, 0.74f);   /* slate */
+    g_va_ready = 1;
+}
+
+static const view_accent *cur_va(void) { return &g_va[g_view]; }
+
+/* Gradient brush helper — creates a vertical linear gradient for graph area
+   fills. Caller must Release() the result. Returns nullptr on failure. */
+static ID2D1LinearGradientBrush *make_vgrad(float x, float y0, float y1,
+                                            D2D1_COLOR_F top, D2D1_COLOR_F bot)
+{
+    D2D1_GRADIENT_STOP stops[2] = {
+        { 0.0f, top },
+        { 1.0f, bot },
+    };
+    ID2D1GradientStopCollection *coll = nullptr;
+    g_rt->CreateGradientStopCollection(stops, 2, &coll);
+    if (!coll) return nullptr;
+    ID2D1LinearGradientBrush *br = nullptr;
+    g_rt->CreateLinearGradientBrush(
+        D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(x, y0),
+            D2D1::Point2F(x, y1)),
+        coll, &br);
+    coll->Release();
+    return br;
+}
 static void draw_inspector_body(const theme_t *th, float ix, float iy, float iw, float ih,
                                 const snapshot_t *snap, int with_backdrop);
 
@@ -329,13 +402,13 @@ static int fmt_bps(wchar_t *buf, uint64_t bps)
     return wsprintfW(buf, L"%u B/s", (unsigned)bps);
 }
 
-/* Single-series filled-area path. Scrolls left by g_anim_phase samples per
-   snapshot period so successive frames present a continuous slide rather than
-   a 4Hz step. The rightmost slot is held flat at the latest value so the chart
-   always reaches the right edge instead of leaving a growing gap. */
+/* Single-series filled-area path with a vertical gradient brush fill so the
+   graph shows luminous top → transparent bottom, giving depth. Scrolls left
+   by g_anim_phase * dx. */
 static void fill_series_path(const uint64_t *s, int n, uint64_t mx,
                              float gx, float gy, float gw, float gh,
-                             float dx, float xshift)
+                             float dx, float xshift,
+                             D2D1_COLOR_F top_color)
 {
     ID2D1PathGeometry *path = nullptr;
     if (FAILED(g_d2d->CreatePathGeometry(&path)) || !path) return;
@@ -350,20 +423,30 @@ static void fill_series_path(const uint64_t *s, int n, uint64_t mx,
         float y = gy + gh - ((float)s[i] / (float)mx) * gh;
         sink->AddLine(D2D1::Point2F(x, y));
     }
-    /* held-flat extension to right edge so the line never ends short */
     float y_last = gy + gh - ((float)s[n - 1] / (float)mx) * gh;
     sink->AddLine(D2D1::Point2F(gx + gw, y_last));
     sink->AddLine(D2D1::Point2F(gx + gw, baseline));
     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
     sink->Close();
     sink->Release();
-    g_rt->FillGeometry(path, g_brush);
+
+    /* gradient fill — luminous at the line, fading to transparent at baseline */
+    D2D1_COLOR_F bot = top_color; bot.a = 0.02f;
+    ID2D1LinearGradientBrush *grad = make_vgrad(gx, gy, baseline, top_color, bot);
+    if (grad) {
+        g_rt->FillGeometry(path, grad);
+        grad->Release();
+    } else {
+        g_brush->SetColor(top_color);
+        g_rt->FillGeometry(path, g_brush);
+    }
     path->Release();
 }
 
 static void stroke_series(const uint64_t *s, int n, uint64_t mx,
                           float gx, float gy, float gw, float gh,
-                          float dx, float xshift, float thickness)
+                          float dx, float xshift, float thickness,
+                          int draw_dots)
 {
     for (int i = 1; i < n; ++i) {
         float x0 = gx + (float)(i - 1) * dx + xshift;
@@ -378,25 +461,39 @@ static void stroke_series(const uint64_t *s, int n, uint64_t mx,
     if (x_last < gx + gw)
         g_rt->DrawLine(D2D1::Point2F(x_last, y_last),
                        D2D1::Point2F(gx + gw, y_last), g_brush, thickness);
+
+    /* dot markers on the last few visible samples for a polished feel */
+    if (draw_dots && n >= 2) {
+        float r = 2.5f * g_scale;
+        int start = n > 20 ? n - 20 : 0;
+        for (int i = start; i < n; ++i) {
+            float cx = gx + (float)i * dx + xshift;
+            float cy = gy + gh - ((float)s[i] / (float)mx) * gh;
+            if (cx >= gx && cx <= gx + gw)
+                g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), g_brush);
+        }
+    }
 }
 
 /* Two-series area+line graph. Series A is drawn on top of B with lighter fill;
    both share the same vertical scale (max of both). Time axis runs left-to-right
    with the most recent sample on the right. Scrolls smoothly via g_anim_phase. */
-static void draw_dual_series(const theme_t *th,
+static void draw_dual_series(const theme_t *th, const view_accent *va,
                              float gx, float gy, float gw, float gh,
                              const uint64_t *sa, const uint64_t *sb, int n,
                              uint64_t cur_a, uint64_t cur_b,
                              const wchar_t *label_a, const wchar_t *label_b,
                              int format_as_bps)
 {
-    /* backdrop + frame */
+    /* backdrop + frame — rounded for modern feel */
+    D2D1_ROUNDED_RECT grr;
+    grr.rect = D2D1::RectF(gx, gy, gx + gw, gy + gh);
+    grr.radiusX = 8.0f * g_scale;
+    grr.radiusY = 8.0f * g_scale;
     g_brush->SetColor(to_d2d(th->subtle, 0.18f));
-    g_rt->FillRectangle(D2D1::RectF(gx, gy, gx + gw, gy + gh), g_brush);
-    g_brush->SetColor(to_d2d(th->subtle, 0.55f));
-    g_rt->DrawRectangle(D2D1::RectF(gx + 0.5f, gy + 0.5f,
-                                    gx + gw - 0.5f, gy + gh - 0.5f),
-                        g_brush, 1.0f);
+    g_rt->FillRoundedRectangle(grr, g_brush);
+    g_brush->SetColor(to_d2d(th->subtle, 0.40f));
+    g_rt->DrawRoundedRectangle(grr, g_brush, 1.0f);
 
     /* horizontal grid lines at 25/50/75% */
     g_brush->SetColor(to_d2d(th->subtle, 0.30f));
@@ -423,14 +520,14 @@ static void draw_dual_series(const theme_t *th,
         g_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         if (sb) {
-            g_brush->SetColor(to_d2d(th->accent, 0.18f));
-            fill_series_path(sb, n, mx, gx, gy, gw, gh, dx, xshift);
-            g_brush->SetColor(to_d2d(th->accent, 0.65f));
-            stroke_series(sb, n, mx, gx, gy, gw, gh, dx, xshift, 1.5f * g_scale);
+            fill_series_path(sb, n, mx, gx, gy, gw, gh, dx, xshift, va->fill2);
+            g_brush->SetColor(va->line2);
+            stroke_series(sb, n, mx, gx, gy, gw, gh, dx, xshift, 1.5f * g_scale, 0);
         }
         if (sa) {
-            g_brush->SetColor(to_d2d(th->accent, 1.0f));
-            stroke_series(sa, n, mx, gx, gy, gw, gh, dx, xshift, 2.0f * g_scale);
+            fill_series_path(sa, n, mx, gx, gy, gw, gh, dx, xshift, va->fill);
+            g_brush->SetColor(va->line);
+            stroke_series(sa, n, mx, gx, gy, gw, gh, dx, xshift, 2.5f * g_scale, 1);
         }
 
         g_rt->PopAxisAlignedClip();
@@ -444,7 +541,7 @@ static void draw_dual_series(const theme_t *th,
     float ly = gy + 6.0f  * g_scale;
     /* swatch A */
     if (label_a) {
-        g_brush->SetColor(to_d2d(th->accent, 1.0f));
+        g_brush->SetColor(va->line);
         g_rt->FillRectangle(D2D1::RectF(lx, ly + 6.0f, lx + 10.0f, ly + 14.0f), g_brush);
         g_brush->SetColor(to_d2d(th->foreground, 0.95f));
         if (format_as_bps) {
@@ -459,7 +556,7 @@ static void draw_dual_series(const theme_t *th,
         ly += 20.0f * g_scale;
     }
     if (label_b) {
-        g_brush->SetColor(to_d2d(th->accent, 0.65f));
+        g_brush->SetColor(va->line2);
         g_rt->FillRectangle(D2D1::RectF(lx, ly + 6.0f, lx + 10.0f, ly + 14.0f), g_brush);
         g_brush->SetColor(to_d2d(th->foreground, 0.85f));
         if (format_as_bps) {
@@ -797,8 +894,9 @@ static IDWriteTextFormat *make_format(const wchar_t *family, DWRITE_FONT_WEIGHT 
 
 static void recreate_text_formats(void)
 {
-    if (g_fmt_data)   { g_fmt_data->Release();   g_fmt_data   = nullptr; }
-    if (g_fmt_chrome) { g_fmt_chrome->Release(); g_fmt_chrome = nullptr; }
+    if (g_fmt_data)    { g_fmt_data->Release();    g_fmt_data    = nullptr; }
+    if (g_fmt_chrome)  { g_fmt_chrome->Release();  g_fmt_chrome  = nullptr; }
+    if (g_fmt_heading) { g_fmt_heading->Release(); g_fmt_heading = nullptr; }
     g_fmt_data = make_format(L"Cascadia Mono", DWRITE_FONT_WEIGHT_NORMAL, 13.0f * g_scale);
     if (!g_fmt_data) g_fmt_data = make_format(L"Consolas",
         DWRITE_FONT_WEIGHT_NORMAL, 13.0f * g_scale);
@@ -806,6 +904,10 @@ static void recreate_text_formats(void)
         DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0f * g_scale);
     if (!g_fmt_chrome) g_fmt_chrome = make_format(L"Segoe UI",
         DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0f * g_scale);
+    g_fmt_heading = make_format(L"Segoe UI Variable Display",
+        DWRITE_FONT_WEIGHT_BOLD, 15.0f * g_scale);
+    if (!g_fmt_heading) g_fmt_heading = make_format(L"Segoe UI",
+        DWRITE_FONT_WEIGHT_BOLD, 15.0f * g_scale);
 }
 
 extern "C" void render_init(HWND hwnd)
@@ -1194,6 +1296,8 @@ extern "C" void render_frame(const snapshot_t *snap)
     if (g_anim_phase > 1.0f) g_anim_phase = 1.0f;
 
     const theme_t *th = theme_current();
+    { static COLORREF prev_acc; if (!g_va_ready || th->accent != prev_acc)
+      { build_view_accents(th); prev_acc = th->accent; } }
 
     D2D1_COLOR_F clear;
     if (g_transparent) { clear.r = clear.g = clear.b = clear.a = 0.0f; }
@@ -1202,7 +1306,10 @@ extern "C" void render_frame(const snapshot_t *snap)
     g_rt->BeginDraw();
     g_rt->Clear(clear);
 
-    g_row_hits_n = 0;    /* context-menu hit-test scratchpad, filled below */
+    /* resolve hover pid from LAST frame's row_hits before clearing them */
+    g_hover_pid = (g_hover_x >= 0 && g_hover_y >= 0)
+        ? render_hit_proc_row(g_hover_x, g_hover_y) : 0xFFFFFFFFu;
+    g_row_hits_n = 0;
 
     float grid_w = g_w_dips;
     if (g_inspector_open) grid_w -= INSPECTOR_W;
@@ -1250,10 +1357,15 @@ extern "C" void render_frame(const snapshot_t *snap)
                                         tx + g_view_tab_w, g_view_tab_y + g_view_tab_h);
             g_rt->DrawText(names[v], lstrlenW(names[v]), g_fmt_chrome, r, g_brush);
             if (active) {
-                g_brush->SetColor(to_d2d(th->accent, 1.0f));
-                g_rt->FillRectangle(D2D1::RectF(tx + 12.0f * g_scale, g_view_tab_y + g_view_tab_h - 3.0f * g_scale,
-                                                tx + g_view_tab_w - 12.0f * g_scale,
-                                                g_view_tab_y + g_view_tab_h - 1.0f), g_brush);
+                g_brush->SetColor(g_va[v].glow);
+                D2D1_ROUNDED_RECT rrr;
+                rrr.rect = D2D1::RectF(tx + 14.0f * g_scale,
+                                       g_view_tab_y + g_view_tab_h - 4.0f * g_scale,
+                                       tx + g_view_tab_w - 14.0f * g_scale,
+                                       g_view_tab_y + g_view_tab_h - 1.0f);
+                rrr.radiusX = 1.5f * g_scale;
+                rrr.radiusY = 1.5f * g_scale;
+                g_rt->FillRoundedRectangle(rrr, g_brush);
             }
             tx += g_view_tab_w;
         }
@@ -1280,30 +1392,35 @@ extern "C" void render_frame(const snapshot_t *snap)
                     ? (uint64_t)((m.commit_used * 1000) / m.commit_limit) : 0;
                 float gw = g_w_dips - left_x * 2.0f;
                 float gh = 130.0f * g_scale;
-                draw_dual_series(th, left_x, yy, gw, gh,
+                draw_dual_series(th, cur_va(), left_x, yy, gw, gh,
                                  sa, sb, hn, cur_phys, cur_commit,
                                  L"physical", L"commit", 0);
                 yy += gh + 18.0f * g_scale;
             }
 
-            /* physical memory headline */
-            g_brush->SetColor(to_d2d(th->foreground, 0.95f));
-            g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            /* physical memory headline — view-colored accent */
+            g_brush->SetColor(g_va[VIEW_MEMORY].line);
+            g_fmt_heading->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             n2 = wsprintfW(buf2, L"physical:  %I64u MB used / %I64u MB total  (%u%% in use)",
                 (m.phys_total - m.phys_avail) / (1024 * 1024),
                 m.phys_total / (1024 * 1024),
                 m.mem_load_pct);
-            g_rt->DrawText(buf2, n2, g_fmt_chrome,
-                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f * g_scale), g_brush);
-            yy += 28.0f * g_scale;
+            g_rt->DrawText(buf2, n2, g_fmt_heading,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 26.0f * g_scale), g_brush);
+            yy += 30.0f * g_scale;
 
-            /* big used bar */
+            /* big used bar — rounded with view-colored fill */
             float bar_w = g_w_dips - left_x * 2.0f;
+            D2D1_ROUNDED_RECT bar_bg;
+            bar_bg.rect = D2D1::RectF(left_x, yy, left_x + bar_w, yy + 18.0f * g_scale);
+            bar_bg.radiusX = 4.0f * g_scale;
+            bar_bg.radiusY = 4.0f * g_scale;
             g_brush->SetColor(to_d2d(th->subtle, 0.30f));
-            g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + bar_w, yy + 18.0f * g_scale), g_brush);
-            g_brush->SetColor(to_d2d(th->accent, 0.65f));
-            g_rt->FillRectangle(D2D1::RectF(left_x, yy,
-                left_x + bar_w * (m.mem_load_pct / 100.0f), yy + 18.0f * g_scale), g_brush);
+            g_rt->FillRoundedRectangle(bar_bg, g_brush);
+            bar_bg.rect.right = left_x + bar_w * (m.mem_load_pct / 100.0f);
+            D2D1_COLOR_F mbc = g_va[VIEW_MEMORY].bar;
+            g_brush->SetColor(mbc);
+            g_rt->FillRoundedRectangle(bar_bg, g_brush);
             yy += 28.0f * g_scale;
 
             /* commit + kernel pools + page faults */
@@ -1318,11 +1435,17 @@ extern "C" void render_frame(const snapshot_t *snap)
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
             yy += 26.0f * g_scale;
 
+            D2D1_ROUNDED_RECT cbg;
+            cbg.rect = D2D1::RectF(left_x, yy, left_x + bar_w, yy + 14.0f * g_scale);
+            cbg.radiusX = 3.0f * g_scale;
+            cbg.radiusY = 3.0f * g_scale;
             g_brush->SetColor(to_d2d(th->subtle, 0.30f));
-            g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + bar_w, yy + 14.0f * g_scale), g_brush);
-            g_brush->SetColor(to_d2d(th->accent, 0.55f));
-            g_rt->FillRectangle(D2D1::RectF(left_x, yy,
-                left_x + bar_w * (commit_pct / 100.0f), yy + 14.0f * g_scale), g_brush);
+            g_rt->FillRoundedRectangle(cbg, g_brush);
+            cbg.rect.right = left_x + bar_w * (commit_pct / 100.0f);
+            D2D1_COLOR_F cbc = g_va[VIEW_MEMORY].line2;
+            cbc.a = 0.55f;
+            g_brush->SetColor(cbc);
+            g_rt->FillRoundedRectangle(cbg, g_brush);
             yy += 24.0f * g_scale;
 
             n2 = wsprintfW(buf2, L"paged pool:     %I64u MB       non-paged pool:  %I64u MB",
@@ -1339,7 +1462,7 @@ extern "C" void render_frame(const snapshot_t *snap)
 
             /* top mem consumers */
             g_brush->SetColor(to_d2d(th->foreground, 0.65f));
-            g_rt->DrawText(L"top working set", 15, g_fmt_chrome,
+            g_rt->DrawText(L"top working set", 15, g_fmt_heading,
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
             yy += 24.0f * g_scale;
             /* hairline */
@@ -1422,18 +1545,27 @@ extern "C" void render_frame(const snapshot_t *snap)
                 format_as_bps = 0;
             }
 
-            g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+            /* headline with view-colored accent text */
+            g_brush->SetColor(cur_va()->line);
+            g_fmt_heading->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            n2 = wsprintfW(buf2, L"%s", headline);
+            g_rt->DrawText(buf2, n2, g_fmt_heading,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 26.0f * g_scale), g_brush);
+            /* aggregate value in dimmer text beside it */
+            g_brush->SetColor(to_d2d(th->foreground, 0.65f));
             g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            float val_x = left_x + 200.0f * g_scale;
             if (mode_gpu) {
-                n2 = wsprintfW(buf2, L"%s  %u.%u%% aggregate",
-                    headline, (unsigned)(cur_a / 10), (unsigned)(cur_a % 10));
+                n2 = wsprintfW(buf2, L"%u.%u%% aggregate",
+                    (unsigned)(cur_a / 10), (unsigned)(cur_a % 10));
             } else {
                 wchar_t v[24]; int vl = fmt_bps(v, cur_a + cur_b); v[vl] = 0;
-                n2 = wsprintfW(buf2, L"%s  %s aggregate", headline, v);
+                n2 = wsprintfW(buf2, L"%s aggregate", v);
             }
             g_rt->DrawText(buf2, n2, g_fmt_chrome,
-                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 24.0f * g_scale), g_brush);
-            yy += 28.0f * g_scale;
+                D2D1::RectF(val_x, yy + 2.0f * g_scale, g_w_dips - left_x,
+                            yy + 26.0f * g_scale), g_brush);
+            yy += 32.0f * g_scale;
 
             /* time-series graph — last ~150 samples (~37s @ 250ms cadence) */
             uint64_t sa[150], sb[150];
@@ -1448,7 +1580,7 @@ extern "C" void render_frame(const snapshot_t *snap)
             float remaining = (g_h_dips - SCRUBBER_H) - yy - 220.0f * g_scale;
             if (remaining < gh) gh = remaining;
             if (gh < 80.0f * g_scale) gh = 80.0f * g_scale;
-            draw_dual_series(th, left_x, yy, gw, gh,
+            draw_dual_series(th, cur_va(), left_x, yy, gw, gh,
                              sa, mode_gpu ? NULL : sb, hn,
                              cur_a, cur_b, label_a, label_b, format_as_bps);
             yy += gh + 16.0f * g_scale;
@@ -1456,7 +1588,7 @@ extern "C" void render_frame(const snapshot_t *snap)
             /* per-adapter strip (network view only) */
             if (mode_net && snap->n_ifaces > 0) {
                 g_brush->SetColor(to_d2d(th->foreground, 0.65f));
-                g_rt->DrawText(L"adapters", 8, g_fmt_chrome,
+                g_rt->DrawText(L"adapters", 8, g_fmt_heading,
                     D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
                 yy += 28.0f * g_scale;
                 g_brush->SetColor(to_d2d(th->subtle, 0.5f));
@@ -1484,7 +1616,9 @@ extern "C" void render_frame(const snapshot_t *snap)
                     const net_if_t *ifc = &snap->ifaces[ni];
                     float v = g_net_in_ema[ni] + g_net_out_ema[ni];
                     float row_w = bar_w_n * (v / nmax);
-                    g_brush->SetColor(to_d2d(th->accent, ifc->up ? 0.30f : 0.12f));
+                    D2D1_COLOR_F nbarc = g_va[VIEW_NETWORK].bar;
+                    nbarc.a = ifc->up ? 0.30f : 0.12f;
+                    g_brush->SetColor(nbarc);
                     g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                         yy + row_h_n - 3.0f * g_scale), g_brush);
                     g_brush->SetColor(to_d2d(th->foreground, ifc->up ? 0.95f : 0.55f));
@@ -1506,7 +1640,7 @@ extern "C" void render_frame(const snapshot_t *snap)
             /* per-physical-disk strip (disk view only) */
             if (mode_disk && snap->n_disks > 0) {
                 g_brush->SetColor(to_d2d(th->foreground, 0.65f));
-                g_rt->DrawText(L"physical disks", 14, g_fmt_chrome,
+                g_rt->DrawText(L"physical disks", 14, g_fmt_heading,
                     D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
                 yy += 28.0f * g_scale;
                 g_brush->SetColor(to_d2d(th->subtle, 0.5f));
@@ -1530,7 +1664,8 @@ extern "C" void render_frame(const snapshot_t *snap)
                     const phys_disk_t *d = &snap->disks[di];
                     float v = g_disk_r_ema[di] + g_disk_w_ema[di];
                     float row_w = bar_w_d * (v / dmax);
-                    g_brush->SetColor(to_d2d(th->accent, 0.30f));
+                    D2D1_COLOR_F barc = g_va[VIEW_DISK].bar; barc.a = 0.30f;
+                    g_brush->SetColor(barc);
                     g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                         yy + row_h_d - 3.0f * g_scale), g_brush);
                     g_brush->SetColor(to_d2d(th->foreground, 0.95f));
@@ -1573,7 +1708,7 @@ extern "C" void render_frame(const snapshot_t *snap)
                 mode_net  ? L"top network i/o" :
                             L"top gpu";
             g_brush->SetColor(to_d2d(th->foreground, 0.65f));
-            g_rt->DrawText(col_label, lstrlenW(col_label), g_fmt_chrome,
+            g_rt->DrawText(col_label, lstrlenW(col_label), g_fmt_heading,
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
             yy += 28.0f * g_scale;
             g_brush->SetColor(to_d2d(th->subtle, 0.5f));
@@ -1591,7 +1726,8 @@ extern "C" void render_frame(const snapshot_t *snap)
                 if (!name) name = L"<unknown>";
                 float row_w = bar_w * ((float)v / (float)max_v);
                 record_row(left_x, yy, g_w_dips - left_x, yy + row_h_v, pp->pid);
-                g_brush->SetColor(to_d2d(th->accent, 0.30f));
+                D2D1_COLOR_F tbc = cur_va()->bar; tbc.a = 0.30f;
+                g_brush->SetColor(tbc);
                 g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                     yy + row_h_v - 2.0f * g_scale), g_brush);
                 g_brush->SetColor(to_d2d(th->foreground, 0.95f));
@@ -1637,7 +1773,7 @@ extern "C" void render_frame(const snapshot_t *snap)
                 uint64_t sa[150], sb[150];
                 int hn = 0;
                 gather_series(sa, sb, &hn, 150, pick_cpu);
-                draw_dual_series(th, gx, graph_y, avail_w, graph_h,
+                draw_dual_series(th, cur_va(), gx, graph_y, avail_w, graph_h,
                                  sa, NULL, hn, snap->agg_cpu_pct, 0,
                                  L"total cpu", NULL, 0);
 
@@ -1670,9 +1806,13 @@ extern "C" void render_frame(const snapshot_t *snap)
                     int row = c / cols, col = c % cols;
                     float mx = gx + col * (meter_w + hgap);
                     float my = gy + row * (meter_h + vgap);
-                    /* meter background */
+                    /* meter background — rounded corners for modern feel */
+                    D2D1_ROUNDED_RECT mr;
+                    mr.rect = D2D1::RectF(mx, my, mx + meter_w, my + meter_h);
+                    mr.radiusX = 6.0f * g_scale;
+                    mr.radiusY = 6.0f * g_scale;
                     g_brush->SetColor(to_d2d(th->subtle, 0.30f));
-                    g_rt->FillRectangle(D2D1::RectF(mx, my, mx + meter_w, my + meter_h), g_brush);
+                    g_rt->FillRoundedRectangle(mr, g_brush);
                     /* history sparkline inside the meter, faint, with the same
                        tween shift as the big graphs so motion feels coherent
                        across the UI */
@@ -1690,7 +1830,9 @@ extern "C" void render_frame(const snapshot_t *snap)
                         float px = mx + meter_w + xshift;   /* xshift is negative → slides left */
                         float py = my + meter_h
                                  - (snapshot_core_hist_at(c, 0) / 100.0f) * meter_h;
-                        g_brush->SetColor(to_d2d(th->accent, 0.28f));
+                        D2D1_COLOR_F sparkc = g_va[VIEW_CPU].line;
+                        sparkc.a = 0.28f;
+                        g_brush->SetColor(sparkc);
                         for (int k = 1; k < chn; ++k) {
                             float nx = px - step;
                             float ny = my + meter_h
@@ -1707,9 +1849,12 @@ extern "C" void render_frame(const snapshot_t *snap)
                     float kpct = snap->cpu_core_kern_pct[c] / 100.0f;
                     float user_top   = my + meter_h - (upct + kpct) * meter_h;
                     float kern_top   = my + meter_h - kpct * meter_h;
-                    g_brush->SetColor(to_d2d(th->accent, 0.75f));
+                    D2D1_COLOR_F kern_c = g_va[VIEW_CPU].line;
+                    kern_c.a = 0.75f;
+                    g_brush->SetColor(kern_c);
                     g_rt->FillRectangle(D2D1::RectF(mx, kern_top, mx + meter_w, my + meter_h), g_brush);
-                    g_brush->SetColor(to_d2d(th->accent, 0.40f));
+                    kern_c.a = 0.35f;
+                    g_brush->SetColor(kern_c);
                     g_rt->FillRectangle(D2D1::RectF(mx, user_top, mx + meter_w, kern_top), g_brush);
                     /* label */
                     g_brush->SetColor(to_d2d(th->foreground, 0.95f));
@@ -1844,14 +1989,43 @@ extern "C" void render_frame(const snapshot_t *snap)
 
         record_row(0.0f, y, grid_w, y + row_h, p->pid);
 
+        /* heat tint — cpu usage intensity mapped to a green→amber→red gradient.
+           quiet processes are neutral; busy ones glow warm; pegged ones glow hot.
+           this lets you spot resource hogs at a glance. */
+        if (p->cpu_pct > 5) {
+            float heat = (float)p->cpu_pct / 1000.0f;    /* 0..1 */
+            if (heat > 1.0f) heat = 1.0f;
+            D2D1_COLOR_F hc;
+            if (heat < 0.5f) {
+                /* green → amber */
+                float t = heat * 2.0f;
+                hc.r = 0.30f + t * 0.70f;
+                hc.g = 0.70f - t * 0.10f;
+                hc.b = 0.20f - t * 0.15f;
+            } else {
+                /* amber → red */
+                float t = (heat - 0.5f) * 2.0f;
+                hc.r = 1.00f;
+                hc.g = 0.60f - t * 0.50f;
+                hc.b = 0.05f;
+            }
+            hc.a = heat * 0.12f;
+            g_brush->SetColor(hc);
+            g_rt->FillRectangle(D2D1::RectF(0.0f, y, grid_w, y + row_h), g_brush);
+        }
+
+        /* hover highlight — subtle luminous glow under the mouse */
+        if (p->pid == g_hover_pid && p->pid != g_selected_pid) {
+            g_brush->SetColor(to_d2d(th->foreground, 0.05f));
+            g_rt->FillRectangle(D2D1::RectF(0.0f, y, grid_w, y + row_h), g_brush);
+        }
+
         if (p->pid == g_selected_pid) {
-            /* subtle accent fill across the row */
             g_brush->SetColor(to_d2d(th->accent, 0.10f));
             D2D1_RECT_F sel = D2D1::RectF(0.0f, y, grid_w, y + row_h);
             g_rt->FillRectangle(sel, g_brush);
-            /* 2px accent left border */
             g_brush->SetColor(to_d2d(th->accent, 1.0f));
-            D2D1_RECT_F bar = D2D1::RectF(0.0f, y, 2.0f, y + row_h);
+            D2D1_RECT_F bar = D2D1::RectF(0.0f, y, 2.5f, y + row_h);
             g_rt->FillRectangle(bar, g_brush);
         }
 
@@ -2146,10 +2320,11 @@ static void draw_inspector_body(const theme_t *th, float ix, float iy, float iw,
 
 extern "C" void render_destroy()
 {
-    if (g_brush)      { g_brush->Release();      g_brush      = nullptr; }
-    if (g_rt)         { g_rt->Release();         g_rt         = nullptr; }
-    if (g_fmt_data)   { g_fmt_data->Release();   g_fmt_data   = nullptr; }
-    if (g_fmt_chrome) { g_fmt_chrome->Release(); g_fmt_chrome = nullptr; }
-    if (g_dw)         { g_dw->Release();         g_dw         = nullptr; }
-    if (g_d2d)        { g_d2d->Release();        g_d2d        = nullptr; }
+    if (g_brush)       { g_brush->Release();       g_brush       = nullptr; }
+    if (g_rt)          { g_rt->Release();          g_rt          = nullptr; }
+    if (g_fmt_data)    { g_fmt_data->Release();    g_fmt_data    = nullptr; }
+    if (g_fmt_chrome)  { g_fmt_chrome->Release();  g_fmt_chrome  = nullptr; }
+    if (g_fmt_heading) { g_fmt_heading->Release(); g_fmt_heading = nullptr; }
+    if (g_dw)          { g_dw->Release();          g_dw          = nullptr; }
+    if (g_d2d)         { g_d2d->Release();         g_d2d         = nullptr; }
 }
