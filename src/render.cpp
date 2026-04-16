@@ -1054,8 +1054,23 @@ extern "C" void render_frame(const snapshot_t *snap)
             int      mode_net  = (g_view == VIEW_NETWORK);
             int      mode_gpu  = (g_view == VIEW_GPU);
 
-            if (mode_disk) { headline = L"system disk i/o";   total_bps = snap->agg_disk_bps; }
-            if (mode_net)  { headline = L"system network i/o"; total_bps = snap->agg_net_bps; }
+            if (mode_disk) {
+                headline = L"system disk i/o";
+                /* prefer physical-disk wire-level bytes over the ETW per-process
+                   sum — ETW is silent when another trace session owns the kernel
+                   logger, but IOCTL_DISK_PERFORMANCE always reports. */
+                uint64_t wire = 0;
+                for (int di = 0; di < snap->n_disks; ++di)
+                    wire += (uint64_t)snap->disks[di].read_bps + snap->disks[di].write_bps;
+                total_bps = wire ? wire : snap->agg_disk_bps;
+            }
+            if (mode_net) {
+                headline = L"system network i/o";
+                uint64_t wire = 0;
+                for (int ni = 0; ni < snap->n_ifaces; ++ni)
+                    wire += (uint64_t)snap->ifaces[ni].in_bps + snap->ifaces[ni].out_bps;
+                total_bps = wire ? wire : snap->agg_net_bps;
+            }
             if (mode_gpu)  { headline = L"gpu activity"; }
 
             g_brush->SetColor(to_d2d(th->foreground, 0.95f));
