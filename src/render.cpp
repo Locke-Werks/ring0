@@ -298,6 +298,23 @@ static void pick_gpu(const snapshot_t *s, uint64_t *g, uint64_t *unused)
     *unused = 0;
 }
 
+static void pick_cpu(const snapshot_t *s, uint64_t *c, uint64_t *unused)
+{
+    *c = s->agg_cpu_pct;     /* fixed point /10 */
+    *unused = 0;
+}
+
+/* Memory pickers — emit fixed-point /10 percentages so they share scale with
+   the cpu/gpu graphs and the dual-series helper renders them with a shared
+   y-axis cap. */
+static void pick_mem(const snapshot_t *s, uint64_t *phys, uint64_t *commit)
+{
+    *phys   = (uint64_t)s->mem.mem_load_pct * 10;
+    *commit = (s->mem.commit_limit > 0)
+        ? (uint64_t)((s->mem.commit_used * 1000) / s->mem.commit_limit)
+        : 0;
+}
+
 /* Format a bytes/sec value into a compact label. */
 static int fmt_bps(wchar_t *buf, uint64_t bps)
 {
@@ -1250,6 +1267,22 @@ extern "C" void render_frame(const snapshot_t *snap)
             wchar_t buf2[160];
             int n2;
 
+            /* dual-series graph: physical-load% and commit% over time */
+            {
+                uint64_t sa[150], sb[150];
+                int hn = 0;
+                gather_series(sa, sb, &hn, 150, pick_mem);
+                uint64_t cur_phys = (uint64_t)m.mem_load_pct * 10;
+                uint64_t cur_commit = (m.commit_limit > 0)
+                    ? (uint64_t)((m.commit_used * 1000) / m.commit_limit) : 0;
+                float gw = g_w_dips - left_x * 2.0f;
+                float gh = 130.0f * g_scale;
+                draw_dual_series(th, left_x, yy, gw, gh,
+                                 sa, sb, hn, cur_phys, cur_commit,
+                                 L"physical", L"commit", 0);
+                yy += gh + 18.0f * g_scale;
+            }
+
             /* physical memory headline */
             g_brush->SetColor(to_d2d(th->foreground, 0.95f));
             g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -1579,9 +1612,6 @@ extern "C" void render_frame(const snapshot_t *snap)
             float ih = (g_h_dips - SCRUBBER_H) - iy;
             draw_inspector_body(th, ix, iy, iw, ih, snap, 0 /* no backdrop */);
         } else if (g_view == VIEW_CPU && snap) {
-            /* per-core meter grid — auto-size cols and meter dimensions to fit
-               the available viewport so all cores are always visible without
-               scrolling, regardless of window width or core count. */
             int cn = snap->cpu_core_count;
             if (cn > 0) {
                 const float pad     = 24.0f * g_scale;
@@ -1594,8 +1624,25 @@ extern "C" void render_frame(const snapshot_t *snap)
 
                 float cpu_w = g_w_dips;
                 if (g_inspector_open) cpu_w -= INSPECTOR_W;
-                float gx = pad, gy = top + 8.0f * g_scale;
+                float gx = pad;
                 float avail_w = cpu_w - pad * 2.0f;
+
+                /* aggregate cpu graph — task-manager style banner above the
+                   per-core meter grid */
+                float graph_h = 140.0f * g_scale;
+                float graph_y = top + 8.0f * g_scale;
+                uint64_t sa[150], sb[150];
+                int hn = 0;
+                gather_series(sa, sb, &hn, 150, pick_cpu);
+                draw_dual_series(th, gx, graph_y, avail_w, graph_h,
+                                 sa, NULL, hn, snap->agg_cpu_pct, 0,
+                                 L"total cpu", NULL, 0);
+
+                float gy = graph_y + graph_h + 16.0f * g_scale;
+
+                /* per-core meter grid — auto-size cols and meter dimensions to fit
+                   the available viewport so all cores are always visible without
+                   scrolling, regardless of window width or core count. */
                 float avail_h = (g_h_dips - SCRUBBER_H) - gy - 8.0f * g_scale;
 
                 /* prefer ~pref_w wide; clamp to fit cn cores. */
@@ -1623,18 +1670,25 @@ extern "C" void render_frame(const snapshot_t *snap)
                     /* meter background */
                     g_brush->SetColor(to_d2d(th->subtle, 0.30f));
                     g_rt->FillRectangle(D2D1::RectF(mx, my, mx + meter_w, my + meter_h), g_brush);
-                    /* history sparkline inside the meter, faint */
-                    int hn = snapshot_core_hist_count();
-                    if (hn > 1) {
+                    /* history sparkline inside the meter, faint, with the same
+                       tween shift as the big graphs so motion feels coherent
+                       across the UI */
+                    int chn = snapshot_core_hist_count();
+                    if (chn > 1) {
                         int maxn = (int)(meter_w / g_scale);
                         if (maxn < 2) maxn = 2;
-                        if (hn > maxn) hn = maxn;
-                        float step = meter_w / (float)(hn - 1);
-                        float px = mx + meter_w;
+                        if (chn > maxn) chn = maxn;
+                        float step = meter_w / (float)(chn - 1);
+                        float xshift = -g_anim_phase * step;
+                        D2D1_RECT_F sclip = D2D1::RectF(mx + 1.0f, my + 1.0f,
+                                                        mx + meter_w - 1.0f,
+                                                        my + meter_h - 1.0f);
+                        g_rt->PushAxisAlignedClip(sclip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                        float px = mx + meter_w + xshift;   /* xshift is negative → slides left */
                         float py = my + meter_h
                                  - (snapshot_core_hist_at(c, 0) / 100.0f) * meter_h;
                         g_brush->SetColor(to_d2d(th->accent, 0.28f));
-                        for (int k = 1; k < hn; ++k) {
+                        for (int k = 1; k < chn; ++k) {
                             float nx = px - step;
                             float ny = my + meter_h
                                      - (snapshot_core_hist_at(c, k) / 100.0f) * meter_h;
@@ -1643,6 +1697,7 @@ extern "C" void render_frame(const snapshot_t *snap)
                                            g_brush, 1.5f * g_scale);
                             px = nx; py = ny;
                         }
+                        g_rt->PopAxisAlignedClip();
                     }
                     /* user layer on top of kernel — stacked so total == user+kernel-busy */
                     float upct = snap->cpu_core_user_pct[c] / 100.0f;
