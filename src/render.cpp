@@ -513,13 +513,16 @@ static void draw_scrubber(const theme_t *th, float x, float y, float w, float h)
     if (max_cpu < 1000) max_cpu = 1000;   /* ceiling at 100% so quiet systems
                                              don't look maxed out */
 
+    /* tween shift — keeps the scrubber moving in lockstep with the per-view
+       graphs so the whole ui scrolls as one */
+    float xshift = -g_anim_phase * col_w;
     g_brush->SetColor(to_d2d(th->accent, 0.45f));
     for (int i = 0; i < n; ++i) {
         const snapshot_t *s = snapshot_at((n - 1) - i);   /* oldest first */
         if (!s) continue;
         float pct = (float)s->agg_cpu_pct / (float)max_cpu;
         if (pct > 1.0f) pct = 1.0f;
-        float bx = x + (float)(240 - n + i) * col_w;
+        float bx = x + (float)(240 - n + i) * col_w + xshift;
         float bh = pct * chart_h;
         D2D1_RECT_F r = D2D1::RectF(bx, chart_y + chart_h - bh,
                                     bx + col_w, chart_y + chart_h);
