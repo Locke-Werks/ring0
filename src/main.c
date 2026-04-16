@@ -365,6 +365,13 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
 
+    case WM_TIMER:
+        if (wp == 1) {
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        break;
+
     case WM_MOUSEWHEEL: {
         int delta = (short)HIWORD(wp);
         UINT lines = 3;
@@ -513,6 +520,12 @@ static int run(void)
     snapshot_start(hwnd, 250);
     trust_start();
     ShowWindow(hwnd, SW_SHOWDEFAULT);
+
+    /* 60fps repaint tick — drives the per-frame EMA and graph tween between
+       250ms snapshot publishes. WM_TIMER is coalesced so the actual cadence
+       is system-timer-resolution limited (~15ms by default), good enough
+       for smooth visual interpolation. */
+    SetTimer(hwnd, 1, 16, NULL);
 
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) {

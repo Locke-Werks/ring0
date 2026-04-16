@@ -99,10 +99,20 @@ static float g_disk_w_ema[PHYS_DISK_MAX];
 static float g_net_in_ema[NETIF_MAX];
 static float g_net_out_ema[NETIF_MAX];
 
-static inline float ema_step(float prev, float cur)
+/* Frame timing — populated at the top of render_frame so every smoother in
+   the file can use a consistent dt and inter-snapshot phase. */
+static const snapshot_t *g_last_snap_seen;
+static DWORD             g_last_snap_change_tick;
+static DWORD             g_last_frame_tick;
+static float             g_anim_phase;       /* 0..1 since last snap publish */
+static float             g_frame_dt;         /* seconds since last paint */
+static float             g_frame_alpha;      /* time-constant 250ms in dt */
+
+static inline float ema_lerp(float prev, float cur)
 {
-    /* alpha=0.35 — visible response to bursts but smooths small jitter */
-    return prev * 0.65f + cur * 0.35f;
+    /* dt-aware EMA so we converge on the same time scale (~250ms) regardless
+       of whether the timer is ticking at 60Hz or 4Hz from a snapshot publish. */
+    return prev + (cur - prev) * g_frame_alpha;
 }
 
 static int is_collapsed(unsigned pid)
@@ -302,9 +312,60 @@ static int fmt_bps(wchar_t *buf, uint64_t bps)
     return wsprintfW(buf, L"%u B/s", (unsigned)bps);
 }
 
+/* Single-series filled-area path. Scrolls left by g_anim_phase samples per
+   snapshot period so successive frames present a continuous slide rather than
+   a 4Hz step. The rightmost slot is held flat at the latest value so the chart
+   always reaches the right edge instead of leaving a growing gap. */
+static void fill_series_path(const uint64_t *s, int n, uint64_t mx,
+                             float gx, float gy, float gw, float gh,
+                             float dx, float xshift)
+{
+    ID2D1PathGeometry *path = nullptr;
+    if (FAILED(g_d2d->CreatePathGeometry(&path)) || !path) return;
+    ID2D1GeometrySink *sink = nullptr;
+    if (FAILED(path->Open(&sink)) || !sink) { path->Release(); return; }
+
+    float baseline = gy + gh;
+    float x0 = gx + xshift;
+    sink->BeginFigure(D2D1::Point2F(x0, baseline), D2D1_FIGURE_BEGIN_FILLED);
+    for (int i = 0; i < n; ++i) {
+        float x = gx + (float)i * dx + xshift;
+        float y = gy + gh - ((float)s[i] / (float)mx) * gh;
+        sink->AddLine(D2D1::Point2F(x, y));
+    }
+    /* held-flat extension to right edge so the line never ends short */
+    float y_last = gy + gh - ((float)s[n - 1] / (float)mx) * gh;
+    sink->AddLine(D2D1::Point2F(gx + gw, y_last));
+    sink->AddLine(D2D1::Point2F(gx + gw, baseline));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    sink->Close();
+    sink->Release();
+    g_rt->FillGeometry(path, g_brush);
+    path->Release();
+}
+
+static void stroke_series(const uint64_t *s, int n, uint64_t mx,
+                          float gx, float gy, float gw, float gh,
+                          float dx, float xshift, float thickness)
+{
+    for (int i = 1; i < n; ++i) {
+        float x0 = gx + (float)(i - 1) * dx + xshift;
+        float x1 = gx + (float)i * dx + xshift;
+        float y0 = gy + gh - ((float)s[i - 1] / (float)mx) * gh;
+        float y1 = gy + gh - ((float)s[i]     / (float)mx) * gh;
+        g_rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), g_brush, thickness);
+    }
+    /* held rightmost segment to the right edge */
+    float x_last = gx + (float)(n - 1) * dx + xshift;
+    float y_last = gy + gh - ((float)s[n - 1] / (float)mx) * gh;
+    if (x_last < gx + gw)
+        g_rt->DrawLine(D2D1::Point2F(x_last, y_last),
+                       D2D1::Point2F(gx + gw, y_last), g_brush, thickness);
+}
+
 /* Two-series area+line graph. Series A is drawn on top of B with lighter fill;
    both share the same vertical scale (max of both). Time axis runs left-to-right
-   with the most recent sample on the right. Useful for read/write, in/out, etc. */
+   with the most recent sample on the right. Scrolls smoothly via g_anim_phase. */
 static void draw_dual_series(const theme_t *th,
                              float gx, float gy, float gw, float gh,
                              const uint64_t *sa, const uint64_t *sb, int n,
@@ -327,63 +388,35 @@ static void draw_dual_series(const theme_t *th,
         g_rt->DrawLine(D2D1::Point2F(gx, ly), D2D1::Point2F(gx + gw, ly), g_brush, 1.0f);
     }
 
-    if (n < 2) return;
-
-    /* find max for scaling */
     uint64_t mx = 1;
-    for (int i = 0; i < n; ++i) {
-        if (sa && sa[i] > mx) mx = sa[i];
-        if (sb && sb[i] > mx) mx = sb[i];
-    }
-    if (mx < 8) mx = 8;
-
-    float dx = gw / (float)(n - 1);
-
-    /* draw series B (write/out) first as filled area + line */
-    if (sb) {
-        g_brush->SetColor(to_d2d(th->accent, 0.18f));
-        for (int i = 1; i < n; ++i) {
-            float x0 = gx + (float)(i - 1) * dx;
-            float x1 = gx + (float)i * dx;
-            float y0 = gy + gh - ((float)sb[i - 1] / (float)mx) * gh;
-            float y1 = gy + gh - ((float)sb[i]     / (float)mx) * gh;
-            /* trapezoid fill */
-            ID2D1PathGeometry *path = nullptr;
-            if (SUCCEEDED(g_d2d->CreatePathGeometry(&path)) && path) {
-                ID2D1GeometrySink *sink = nullptr;
-                if (SUCCEEDED(path->Open(&sink)) && sink) {
-                    sink->BeginFigure(D2D1::Point2F(x0, gy + gh), D2D1_FIGURE_BEGIN_FILLED);
-                    sink->AddLine(D2D1::Point2F(x0, y0));
-                    sink->AddLine(D2D1::Point2F(x1, y1));
-                    sink->AddLine(D2D1::Point2F(x1, gy + gh));
-                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-                    sink->Close();
-                    sink->Release();
-                    g_rt->FillGeometry(path, g_brush);
-                }
-                path->Release();
-            }
+    if (n >= 2) {
+        for (int i = 0; i < n; ++i) {
+            if (sa && sa[i] > mx) mx = sa[i];
+            if (sb && sb[i] > mx) mx = sb[i];
         }
-        g_brush->SetColor(to_d2d(th->accent, 0.65f));
-        for (int i = 1; i < n; ++i) {
-            float x0 = gx + (float)(i - 1) * dx;
-            float x1 = gx + (float)i * dx;
-            float y0 = gy + gh - ((float)sb[i - 1] / (float)mx) * gh;
-            float y1 = gy + gh - ((float)sb[i]     / (float)mx) * gh;
-            g_rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), g_brush, 1.5f * g_scale);
-        }
-    }
+        if (mx < 8) mx = 8;
 
-    /* series A (read/in) — bright line, no fill so B remains visible */
-    if (sa) {
-        g_brush->SetColor(to_d2d(th->accent, 1.0f));
-        for (int i = 1; i < n; ++i) {
-            float x0 = gx + (float)(i - 1) * dx;
-            float x1 = gx + (float)i * dx;
-            float y0 = gy + gh - ((float)sa[i - 1] / (float)mx) * gh;
-            float y1 = gy + gh - ((float)sa[i]     / (float)mx) * gh;
-            g_rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), g_brush, 2.0f * g_scale);
+        float dx = gw / (float)(n - 1);
+        float xshift = -g_anim_phase * dx;
+
+        /* clip lines to chart so the shifted-off-screen leftmost doesn't
+           bleed onto the legend or the strip below */
+        D2D1_RECT_F clip = D2D1::RectF(gx + 1.0f, gy + 1.0f,
+                                       gx + gw - 1.0f, gy + gh - 1.0f);
+        g_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        if (sb) {
+            g_brush->SetColor(to_d2d(th->accent, 0.18f));
+            fill_series_path(sb, n, mx, gx, gy, gw, gh, dx, xshift);
+            g_brush->SetColor(to_d2d(th->accent, 0.65f));
+            stroke_series(sb, n, mx, gx, gy, gw, gh, dx, xshift, 1.5f * g_scale);
         }
+        if (sa) {
+            g_brush->SetColor(to_d2d(th->accent, 1.0f));
+            stroke_series(sa, n, mx, gx, gy, gw, gh, dx, xshift, 2.0f * g_scale);
+        }
+
+        g_rt->PopAxisAlignedClip();
     }
 
     /* legend in top-left of the chart */
@@ -1118,6 +1151,28 @@ extern "C" void render_frame(const snapshot_t *snap)
         if (hist) snap = hist;
     }
 
+    /* frame timing for tweens */
+    DWORD now_tick = GetTickCount();
+    if (g_last_frame_tick == 0) g_last_frame_tick = now_tick;
+    g_frame_dt = (float)(now_tick - g_last_frame_tick) / 1000.0f;
+    if (g_frame_dt > 0.1f) g_frame_dt = 0.1f;       /* clamp after pause/stalls */
+    if (g_frame_dt < 0.001f) g_frame_dt = 0.001f;
+    g_last_frame_tick = now_tick;
+    /* time-constant of 0.25s in continuous EMA form. larger frame dt → bigger
+       per-step alpha, so convergence speed stays roughly constant. */
+    g_frame_alpha = g_frame_dt / (g_frame_dt + 0.25f);
+
+    /* phase 0..1 from last snapshot publish to next. snapshot publishes every
+       250ms; we hold at 1.0 once we've reached the next one. */
+    if (snap && snap != g_last_snap_seen) {
+        g_last_snap_seen = snap;
+        g_last_snap_change_tick = now_tick;
+    }
+    DWORD elapsed = now_tick - g_last_snap_change_tick;
+    g_anim_phase = (float)elapsed / 250.0f;
+    if (g_anim_phase < 0.0f) g_anim_phase = 0.0f;
+    if (g_anim_phase > 1.0f) g_anim_phase = 1.0f;
+
     const theme_t *th = theme_current();
 
     D2D1_COLOR_F clear;
@@ -1374,8 +1429,8 @@ extern "C" void render_frame(const snapshot_t *snap)
 
                 /* EMA per slot — smooths bar width without lying about the rate */
                 for (int ni = 0; ni < snap->n_ifaces; ++ni) {
-                    g_net_in_ema[ni]  = ema_step(g_net_in_ema[ni],  (float)snap->ifaces[ni].in_bps);
-                    g_net_out_ema[ni] = ema_step(g_net_out_ema[ni], (float)snap->ifaces[ni].out_bps);
+                    g_net_in_ema[ni]  = ema_lerp(g_net_in_ema[ni],  (float)snap->ifaces[ni].in_bps);
+                    g_net_out_ema[ni] = ema_lerp(g_net_out_ema[ni], (float)snap->ifaces[ni].out_bps);
                 }
 
                 /* normalise against link speed when known so we get a consistent
@@ -1423,8 +1478,8 @@ extern "C" void render_frame(const snapshot_t *snap)
                 yy += 8.0f * g_scale;
 
                 for (int di = 0; di < snap->n_disks; ++di) {
-                    g_disk_r_ema[di] = ema_step(g_disk_r_ema[di], (float)snap->disks[di].read_bps);
-                    g_disk_w_ema[di] = ema_step(g_disk_w_ema[di], (float)snap->disks[di].write_bps);
+                    g_disk_r_ema[di] = ema_lerp(g_disk_r_ema[di], (float)snap->disks[di].read_bps);
+                    g_disk_w_ema[di] = ema_lerp(g_disk_w_ema[di], (float)snap->disks[di].write_bps);
                 }
 
                 float dmax = 1.0f;
