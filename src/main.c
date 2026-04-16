@@ -266,6 +266,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
+        if (render_hit_tree_pill(x, y)) {
+            render_toggle_tree();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
         int tab = render_hit_tab(x, y);
         if (tab >= 0) {
             render_set_inspector_tab(tab);

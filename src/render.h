@@ -41,6 +41,7 @@ void render_set_filter(const wchar_t *text, int caret);
 /* Scope pills. 0 = all, 1 = user (session != 0), 2 = system (session == 0). */
 void render_set_scope(int scope);
 int  render_hit_pill(int x, int y);   /* -1 if not on a pill */
+int  render_hit_tree_pill(int x, int y);   /* 1 if on the tree-mode toggle */
 
 /* Inspector side panel. */
 void render_toggle_inspector(void);

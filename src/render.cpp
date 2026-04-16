@@ -44,6 +44,7 @@ static int                    g_filter_len;
 static int                    g_filter_caret;
 static int                    g_scope;                /* 0 all, 1 user, 2 system */
 static float                  g_pill_x[3], g_pill_y, g_pill_w, g_pill_h;
+static float                  g_tree_pill_x, g_tree_pill_w;
 static int                    g_inspector_open = 1;
 static int                    g_inspector_tab;        /* 0 modules, 1 network, 2 stack */
 static const float            INSPECTOR_W_BASE = 280.0f;
@@ -874,6 +875,14 @@ extern "C" int render_hit_pill(int x, int y)
     return -1;
 }
 
+extern "C" int render_hit_tree_pill(int x, int y)
+{
+    if ((float)y < g_pill_y || (float)y >= g_pill_y + g_pill_h) return 0;
+    if ((float)x < g_tree_pill_x ||
+        (float)x >= g_tree_pill_x + g_tree_pill_w) return 0;
+    return 1;
+}
+
 extern "C" void render_set_filter(const wchar_t *text, int caret)
 {
     g_filter_len = 0;
@@ -934,6 +943,12 @@ static void draw_command_bar(const theme_t *th, float width, float height)
     static const wchar_t *labels[3] = { L"all", L"user", L"system" };
     for (int i = 0; i < 3; ++i)
         draw_pill(th, g_pill_x[i], g_pill_y, pill_w, pill_h, labels[i], i == g_scope);
+
+    /* tree toggle — separate pill group sitting just left of the scope pills,
+       so its on/off state isn't confused with scope selection */
+    g_tree_pill_w = 60.0f * g_scale;
+    g_tree_pill_x = g_pill_x[0] - pill_gap * 3.0f - g_tree_pill_w;
+    draw_pill(th, g_tree_pill_x, g_pill_y, g_tree_pill_w, pill_h, L"tree", g_tree_mode);
 
 
     const float input_x = 14.0f * g_scale;
