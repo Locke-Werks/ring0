@@ -535,13 +535,14 @@ static int run(void)
     return (int)m.wParam;
 }
 
-void WinMainCRTStartup(void)
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmdLine, int show)
 {
+    (void)hInst; (void)hPrev; (void)cmdLine; (void)show;
 #ifdef DEBUG
     arena_selftest();
     ringbuf_selftest();
     intern_selftest();
     filter_selftest();
 #endif
-    ExitProcess((UINT)run());
+    return run();
 }

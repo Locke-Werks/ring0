@@ -20,7 +20,7 @@ if not defined VCINSTALLDIR (
 
 if not exist build mkdir build
 
-set CL_COMMON=/c /O1 /Os /GS- /Gs9999999 /GR- /EHs-c- /Zl /W4 /WX /nologo /DUNICODE /D_UNICODE /Isrc
+set CL_COMMON=/c /O2 /GR- /EHsc /MT /W4 /WX /nologo /DUNICODE /D_UNICODE /Isrc
 if /I "%MODE%"=="debug"   set CL_MODE=/Zi /DDEBUG /Fdbuild\ring0.pdb
 if /I "%MODE%"=="release" set CL_MODE=/DNDEBUG
 
@@ -32,7 +32,7 @@ for %%f in (src\*.c src\*.cpp) do (
     set OBJS=!OBJS! build\%%~nf.obj
 )
 
-set LINK_COMMON=/SUBSYSTEM:WINDOWS,6.00 /ENTRY:WinMainCRTStartup /NODEFAULTLIB /MERGE:.rdata=.text /MERGE:.pdata=.text /ALIGN:16 /MANIFEST:EMBED /MANIFESTUAC:NO /MANIFESTINPUT:res\ring0.manifest /OPT:REF /OPT:ICF=4 /STACK:0x100000,0x100000 /OUT:build\ring0.exe /nologo
+set LINK_COMMON=/SUBSYSTEM:WINDOWS,6.00 /MANIFEST:EMBED /MANIFESTUAC:NO /MANIFESTINPUT:res\ring0.manifest /OPT:REF /OPT:ICF=4 /STACK:0x100000,0x100000 /OUT:build\ring0.exe /nologo
 set LINK_LIBS=kernel32.lib user32.lib gdi32.lib ntdll.lib d2d1.lib dwrite.lib dxgi.lib d3d11.lib dwmapi.lib advapi32.lib wintrust.lib iphlpapi.lib dbghelp.lib shell32.lib ole32.lib
 if /I "%MODE%"=="debug" set LINK_MODE=/DEBUG /PDB:build\ring0.pdb
 
@@ -40,15 +40,7 @@ echo link
 link %LINK_COMMON% %LINK_MODE% %OBJS% %LINK_LIBS%
 if errorlevel 1 exit /b 1
 
-if /I "%MODE%"=="release" (
-    if exist tools\crinkler\crinkler.exe (
-        echo crinkler
-        tools\crinkler\crinkler.exe %LINK_COMMON% %OBJS% %LINK_LIBS% /OUT:build\ring0.exe
-        if errorlevel 1 exit /b 1
-    ) else (
-        echo warning: tools\crinkler\crinkler.exe not found. release binary is msvc-linked, not packed.
-    )
-)
+rem crinkler removed — binary size is no longer a constraint
 
 for %%s in (build\ring0.exe) do echo built: %%s  %%~zs bytes
 endlocal
