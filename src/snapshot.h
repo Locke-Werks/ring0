@@ -89,6 +89,11 @@ const snapshot_t *snapshot_current(void);   /* atomic load, may be NULL early */
 const snapshot_t *snapshot_at(int back);
 int               snapshot_count(void);
 
+/* Per-core total busy% history. back=0 is newest; 0..snapshot_core_hist_count-1. */
+#define SNAPSHOT_CORE_HIST_N 120
+int     snapshot_core_hist_count(void);
+uint8_t snapshot_core_hist_at(int core, int back);
+
 #ifdef __cplusplus
 }
 #endif

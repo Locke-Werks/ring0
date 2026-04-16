@@ -1226,6 +1226,27 @@ extern "C" void render_frame(const snapshot_t *snap)
                     /* meter background */
                     g_brush->SetColor(to_d2d(th->subtle, 0.30f));
                     g_rt->FillRectangle(D2D1::RectF(mx, my, mx + meter_w, my + meter_h), g_brush);
+                    /* history sparkline inside the meter, faint */
+                    int hn = snapshot_core_hist_count();
+                    if (hn > 1) {
+                        int maxn = (int)(meter_w / g_scale);
+                        if (maxn < 2) maxn = 2;
+                        if (hn > maxn) hn = maxn;
+                        float step = meter_w / (float)(hn - 1);
+                        float px = mx + meter_w;
+                        float py = my + meter_h
+                                 - (snapshot_core_hist_at(c, 0) / 100.0f) * meter_h;
+                        g_brush->SetColor(to_d2d(th->accent, 0.28f));
+                        for (int k = 1; k < hn; ++k) {
+                            float nx = px - step;
+                            float ny = my + meter_h
+                                     - (snapshot_core_hist_at(c, k) / 100.0f) * meter_h;
+                            g_rt->DrawLine(D2D1::Point2F(nx, ny),
+                                           D2D1::Point2F(px, py),
+                                           g_brush, 1.5f * g_scale);
+                            px = nx; py = ny;
+                        }
+                    }
                     /* user layer on top of kernel — stacked so total == user+kernel-busy */
                     float upct = snap->cpu_core_user_pct[c] / 100.0f;
                     float kpct = snap->cpu_core_kern_pct[c] / 100.0f;

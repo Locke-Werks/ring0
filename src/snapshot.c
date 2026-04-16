@@ -36,6 +36,12 @@ static ULONG  g_page_size;
 static ULONG  g_prev_page_faults;
 static uint64_t g_prev_faults_ms;
 
+/* Per-core rolling busy% for CPU-view sparklines. Sized to cover a 30s window
+   at 250 ms cadence, which is plenty to see recent spikes without feeling stale. */
+static uint8_t g_core_hist[64][SNAPSHOT_CORE_HIST_N];
+static int     g_core_hist_head;
+static int     g_core_hist_count;
+
 static void fill_mem_stats(snapshot_t *cur)
 {
     MEMORYSTATUSEX ms = { sizeof ms };
@@ -345,6 +351,13 @@ static void take_sample(void)
     fill_deltas(snap, g_prev_for_cpu);
     fill_per_core(snap);
     fill_mem_stats(snap);
+
+    /* roll per-core history */
+    g_core_hist_head = (g_core_hist_head + 1) % SNAPSHOT_CORE_HIST_N;
+    for (int i = 0; i < snap->cpu_core_count; ++i) {
+        g_core_hist[i][g_core_hist_head] = snap->cpu_core_pct[i];
+    }
+    if (g_core_hist_count < SNAPSHOT_CORE_HIST_N) g_core_hist_count++;
     snap->n_disks  = (uint8_t)physdisk_sample(snap->disks,  PHYS_DISK_MAX, snap->timestamp);
     snap->n_ifaces = (uint8_t)netif_sample(snap->ifaces, NETIF_MAX, snap->timestamp);
     g_prev_for_cpu = snap;
@@ -442,3 +455,13 @@ const snapshot_t *snapshot_at(int back)
 }
 
 int snapshot_count(void) { return g_pub_count; }
+
+int snapshot_core_hist_count(void) { return g_core_hist_count; }
+
+uint8_t snapshot_core_hist_at(int core, int back)
+{
+    if (core < 0 || core >= 64) return 0;
+    if (back < 0 || back >= g_core_hist_count) return 0;
+    int idx = (g_core_hist_head - back + SNAPSHOT_CORE_HIST_N) % SNAPSHOT_CORE_HIST_N;
+    return g_core_hist[core][idx];
+}
