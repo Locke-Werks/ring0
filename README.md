@@ -13,7 +13,6 @@
 
 ---
 
-native win32 task manager. no CRT, sub-50KB packed with crinkler.
 win10 21H2+ / win11, x64.
 
 ## build
