@@ -100,6 +100,10 @@ bool WindowChrome::hits(QQuickItem* item, QPointF logical) const
 bool WindowChrome::nativeEventFilter(const QByteArray& type, void* message, qintptr* result)
 {
     if (type != "windows_generic_MSG" || !hwnd_) return false;
+    // The event dispatcher filters queued messages (the non-client clicks
+    // among them) before dispatch and passes no result slot.
+    qintptr unused = 0;
+    if (!result) result = &unused;
     auto* msg = static_cast<MSG*>(message);
     const auto hwnd = static_cast<HWND>(hwnd_);
     if (msg->hwnd != hwnd) return false;
