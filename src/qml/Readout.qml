@@ -15,7 +15,7 @@ Column {
     property int size: 34
 
     property real shown: value
-    Behavior on shown { NumberAnimation { duration: 950; easing.type: Easing.InOutSine } }
+    Behavior on shown { NumberAnimation { duration: 1000; easing.type: Easing.Linear } }
 
     spacing: 2
     Text {

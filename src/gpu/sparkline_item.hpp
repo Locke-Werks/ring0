@@ -2,18 +2,20 @@
 #pragma once
 
 #include <QColor>
-#include <QElapsedTimer>
 #include <QList>
+#include <QMetaObject>
 #include <QPointer>
 #include <QQuickItem>
 #include <QtQml/qqmlregistration.h>
 
+#include <vector>
+
 class QQuickWindow;
 
-// History graph drawn entirely in the scene graph. Pulls its series from
-// SnapshotBridge (or the `values` list when `metric` is empty), uploads the
-// previous and current series as vertex data, and tweens between them on the
-// GPU while the whole graph glides one sample to the left.
+// History graph drawn entirely in the scene graph. Each sample is placed by its
+// own timestamp, and every frame the whole graph is drawn at "now minus a fixed
+// delay", so it moves at one constant speed regardless of when samples are
+// delivered. Data changes rebuild the vertex buffer; frames only update uniforms.
 class SparklineItem : public QQuickItem {
     Q_OBJECT
     QML_NAMED_ELEMENT(Sparkline)
@@ -58,11 +60,12 @@ protected:
     void geometryChange(const QRectF& now, const QRectF& before) override;
 
 private:
+    struct Knot { double time; double value; };
+
     void refresh();
-    void accept(QList<double> next);
     void onFrame();
     void attachWindow(QQuickWindow* w);
-    double scaleTop(const QList<double>& v) const;
+    double targetTop() const;
 
     QString metric_;
     int samples_ = 60;
@@ -72,18 +75,17 @@ private:
     double line_width_ = 1.5;
     QList<double> user_values_;
 
-    QList<double> prev_;
-    QList<double> cur_;
-    double prev_top_ = 1.0;
-    bool scroll_ = false;
+    std::vector<Knot> knots_;     // oldest first; times in timebase ms
+    std::vector<float> tess_t_, tess_v_;  // tessellated curve, times relative to the newest knot
+    float edgeValue() const;      // the curve's value where it meets the right edge
+    bool live_ = false;           // following the clock rather than frozen (scrub, static values)
     bool geometry_dirty_ = true;
 
-    float t_ = 1.0f;
-    bool tweening_ = false;
-    QElapsedTimer clock_;
-    QElapsedTimer interval_clock_;
-    float interval_ms_ = 0.0f;   // smoothed gap between live samples
-    bool linear_ = false;
+    // Per-frame state, written on the GUI thread and read during sync.
+    double age_ms_ = 0;           // render time minus newest knot time
+    double top_ = 0;              // displayed scale, eased toward the target
+    double last_frame_ms_ = 0;
+
     QPointer<QQuickWindow> window_;
     QMetaObject::Connection frame_conn_;
 };

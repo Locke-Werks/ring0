@@ -58,13 +58,10 @@ private:
     qreal row_gap_ = 1.0;
 
     int rows_ = 0;
-    int cols_ = 0;                    // texture width, samples_ + 1
+    int cols_ = 0;                    // texture width, samples_ + 2
     std::vector<std::uint8_t> cells_; // row-major, rows_ x cols_
     bool cells_dirty_ = false;
-    std::uint64_t last_seq_ = 0;
-    QElapsedTimer scroll_clock_;
-    QElapsedTimer interval_clock_;
-    float interval_ms_ = 0.0f;   // smoothed gap between live samples
-    bool scrolling_ = false;
+    double newest_ms_ = 0;            // timestamp of the newest column
+    bool live_ = false;               // following the clock (not scrubbed)
     QMetaObject::Connection frame_conn_;
 };

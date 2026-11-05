@@ -198,3 +198,15 @@ QList<double> SnapshotBridge::series(const QString& metric, int n) const
         out.push_back(metric_of(*snaps[i], metric));
     return out;
 }
+
+std::vector<SnapshotBridge::TimedValue> SnapshotBridge::timedSeries(const QString& metric, int n) const
+{
+    std::vector<TimedValue> out;
+    if (n <= 0) return out;
+    const auto snaps = history_.tail(std::size_t(n) + std::size_t(scrub_back_));
+    const auto end = snaps.size() - std::min(snaps.size(), std::size_t(scrub_back_));
+    out.reserve(end);
+    for (std::size_t i = 0; i < end; ++i)
+        out.push_back({snaps[i]->time_ms, metric_of(*snaps[i], metric)});
+    return out;
+}

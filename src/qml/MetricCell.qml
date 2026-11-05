@@ -14,7 +14,7 @@ Item {
 
     readonly property real frac: scale > 0 ? Math.min(1, value / scale) : 0
     property real shown: frac
-    Behavior on shown { NumberAnimation { duration: 950; easing.type: Easing.InOutSine } }
+    Behavior on shown { NumberAnimation { duration: 1000; easing.type: Easing.Linear } }
 
     Rectangle {
         anchors.right: parent.right

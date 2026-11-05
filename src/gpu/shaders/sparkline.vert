@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #version 440
 
-// a0: A slot, B slot (counted in samples from the right edge), kind, side
-// a1: A prev y, A cur y, B prev y, B cur y, in item pixels
-// a2: endpoint (0 A, 1 B), dot corner x, dot corner y
-// kind: 0 fill, 1 line, 2 glow, 3 newest-sample dot
+// a0: time A, time B (ms relative to the newest sample, <= 0), kind, side
+// a1: value A, value B, endpoint (0 A, 1 B), unused
+// a2: dot corner x, dot corner y
+// kind: 0 fill, 1 line, 2 glow, 3 leading-edge dot
 layout(location = 0) in vec4 a0;
 layout(location = 1) in vec4 a1;
-layout(location = 2) in vec3 a2;
+layout(location = 2) in vec2 a2;
 
 layout(location = 0) out float vKind;
 layout(location = 1) out vec2 vD;
@@ -15,34 +15,35 @@ layout(location = 1) out vec2 vD;
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     float qt_Opacity;
-    float t;
-    float stepX;
+    float age;
+    float pxPerMs;
     float halfWidth;
     vec4 color;
     vec2 size;
-    float scroll;
+    float top;
     float fillOn;
     float glow;
     float dotRadius;
     float glowRadius;
-    float pad;
+    float edgeValue;
 };
+
+float yOf(float v)
+{
+    return size.y - clamp(v / max(top, 1e-6), 0.0, 1.0) * size.y;
+}
 
 void main()
 {
     float kind = a0.z;
     float side = a0.w;
-    float endB = a2.x;
+    float endB = a1.z;
 
-    // Live scrolling: the newest sample starts one step past the right edge
-    // and the whole series moves left at constant speed until the next sample
-    // lands. The item clips, so new data enters from off-screen and no point
-    // on screen ever changes shape. Values are final on arrival, so y only
-    // morphs for non-scroll changes (scrubbing, metric switches).
-    float shift = stepX * scroll * (1.0 - t);
-    float ky = scroll > 0.5 ? 1.0 : t;
-    vec2 A = vec2(size.x - stepX * a0.x + shift, mix(a1.x, a1.y, ky));
-    vec2 B = vec2(size.x - stepX * a0.y + shift, mix(a1.z, a1.w, ky));
+    // Position is a pure function of time: the right edge is the render time,
+    // and every sample sits at its own timestamp. Motion is therefore one
+    // constant velocity, unaffected by when a sample was delivered.
+    vec2 A = vec2(size.x + (a0.x - age) * pxPerMs, yOf(a1.x));
+    vec2 B = vec2(size.x + (a0.y - age) * pxPerMs, yOf(a1.y));
     vec2 P = mix(A, B, endB);
     vec2 d = vec2(side, 0.0);
 
@@ -60,9 +61,10 @@ void main()
         P += n * side * reach + dir * (endB * 2.0 - 1.0) * ext;
         d = vec2(side * reach, 0.0);
     } else {
+        // Inset by its own radius so the whole dot stays inside the clip.
         float reach = dotRadius + 1.0;
-        P = B + a2.yz * reach;
-        d = a2.yz * reach;
+        P = vec2(size.x - reach, yOf(edgeValue)) + a2 * reach;
+        d = a2 * reach;
     }
 
     vKind = kind;

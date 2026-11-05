@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gpu/heatmap_item.hpp"
 #include "app/snapshot_bridge.hpp"
+#include "core/timebase.hpp"
 
 #include <QQuickWindow>
 #include <QSGGeometryNode>
@@ -15,7 +16,6 @@
 
 namespace {
 
-constexpr qint64 kScrollMs = 250;
 
 // Owns an R8 QRhiTexture and re-uploads only when the item hands it new cells.
 // The QRhiTexture is recreated only when the grid size changes.
@@ -167,7 +167,8 @@ void HeatmapItem::itemChange(ItemChange change, const ItemChangeData& data)
         // scroll locked to the window's own clock instead of a free-running timer.
         if (data.window)
             frame_conn_ = connect(data.window, &QQuickWindow::afterAnimating, this, [this] {
-                if (scrolling_) update();
+                // Live: position follows the clock every frame, like the sparklines.
+                if (live_ && rows_ > 0 && isVisible()) update();
             });
     }
     QQuickItem::itemChange(change, data);
@@ -179,16 +180,15 @@ void HeatmapItem::refresh()
     const auto latest = bridge->history().latest();
     const std::uint64_t seq = latest ? latest->seq : 0;
     // Only a live new sample scrolls; scrubbing jumps straight to the position.
-    const bool animate = seq != last_seq_ && bridge->scrubBack() == 0 && last_seq_ != 0;
-    last_seq_ = seq;
-    rebuild(animate);
+    (void)seq;
+    rebuild(false);
 }
 
 void HeatmapItem::rebuild(bool animate)
 {
     auto* bridge = SnapshotBridge::instance();
     const int scrub = bridge->scrubBack();
-    const auto snaps = bridge->history().tail(std::size_t(samples_ + 1 + scrub));
+    const auto snaps = bridge->history().tail(std::size_t(samples_ + 2 + scrub));
     const std::size_t end = snaps.size() - std::min(snaps.size(), std::size_t(scrub));
 
     const bool gpu = source_ == QLatin1String("gpu");
@@ -198,7 +198,8 @@ void HeatmapItem::rebuild(bool animate)
         rows = gpu ? (s.gpus.empty() ? 0 : int(s.gpus.front().engines.size())) : int(s.cores.size());
     }
 
-    const int cols = samples_ + 1;
+    // Two spare columns: the newest sits past the right edge until its time comes.
+    const int cols = samples_ + 2;
     cells_.assign(std::size_t(rows) * std::size_t(cols), 0);
     // Right-aligned so the newest sample always lands in the last column.
     const int first = cols - int(end);
@@ -223,24 +224,20 @@ void HeatmapItem::rebuild(bool animate)
         emit rowsChanged();
     }
 
-    // Constant-velocity scroll across the measured gap between samples, matching
-    // the sparklines, so every graph in the window moves at one steady speed.
-    if (animate && interval_clock_.isValid()) {
-        const float gap = float(interval_clock_.elapsed());
-        if (gap > 100.0f && gap < 5000.0f)
-            interval_ms_ = interval_ms_ <= 0.0f ? gap : interval_ms_ * 0.8f + gap * 0.2f;
-    }
-    if (animate) interval_clock_.restart();
-    scrolling_ = animate;
-    if (animate) scroll_clock_.start();
+    (void)animate;
+    live_ = scrub == 0;
+    newest_ms_ = end > 0 ? snaps[end - 1]->time_ms : 0.0;
     update();
 }
 
 float HeatmapItem::phase() const
 {
-    if (!scrolling_) return 1.0f;
-    const float dur = interval_ms_ > 0.0f ? interval_ms_ : float(kScrollMs);
-    return std::clamp(float(scroll_clock_.elapsed()) / dur, 0.0f, 1.0f);
+    namespace tb = ring0::timebase;
+    if (!live_ || newest_ms_ <= 0) return 0.0f;
+    // Columns by timestamp: 0 puts the newest sample on the right edge,
+    // negative values hold it off-screen until the render time reaches it.
+    const double cols = ((tb::now_ms() - tb::kRenderDelayMs) - newest_ms_) / tb::kPeriodMs;
+    return float(std::clamp(cols, -1.95, 0.0));
 }
 
 QSGNode* HeatmapItem::updatePaintNode(QSGNode* old, UpdatePaintNodeData*)
@@ -270,7 +267,6 @@ QSGNode* HeatmapItem::updatePaintNode(QSGNode* old, UpdatePaintNodeData*)
         cells_dirty_ = false;
     }
     const float p = phase();
-    if (p >= 1.0f) scrolling_ = false;
 
     m->rows = float(rows_);
     m->cols = float(samples_);

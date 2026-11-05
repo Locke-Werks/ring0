@@ -9,7 +9,7 @@ layout(std140, binding = 0) uniform buf {
     float qt_Opacity;
     float rows;
     float cols;     // visible columns; the texture holds cols + 1
-    float phase;    // 0..1 progress of the one-column scroll after a new sample
+    float phase;    // columns the render time sits past the newest sample (<= 0)
     vec4 hue;       // linear-light rgb
     float rowPx;
     float gap;
@@ -58,7 +58,8 @@ void main()
     // Inside a row the value must not bleed into its neighbours, so v snaps to
     // the row centre while u keeps linear filtering for a smooth time axis.
     float v = (row + 0.5) / rows;
-    float u = (v_uv.x * cols + phase) / (cols + 1.0) + 0.5 / (cols + 1.0);
+    // Texture holds cols + 2 columns, newest last; phase 0 lands it on the right edge.
+    float u = (v_uv.x * cols + 1.0 + phase + 0.5) / (cols + 2.0);
     float t = clamp(texture(values, vec2(u, v)).r, 0.0, 1.0);
 
     vec3 cold = toLab(toLinear(vec3(0.0549)));

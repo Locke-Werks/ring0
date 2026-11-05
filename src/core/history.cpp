@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "core/history.hpp"
 #include "core/sampler.hpp"
+#include "core/timebase.hpp"
 
 #include <windows.h>
 
@@ -70,21 +71,33 @@ void SamplerThread::run(std::stop_token st)
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::stop_callback cb(st, [wake] { SetEvent(wake); });
 
+    // Absolute deadlines: sample k is taken at start + k * period no matter how
+    // long the previous pass took, so the spacing between samples stays even.
     std::uint64_t seq = 0;
-    std::uint64_t last_tick = 0;
+    double last_time = 0;
+    const double start = timebase::now_ms();
+    double deadline = start;
     while (!st.stop_requested()) {
         auto snap = std::make_shared<Snapshot>();
         snap->seq = ++seq;
         snap->tick_ms = GetTickCount64();
-        const double dt = last_tick ? (snap->tick_ms - last_tick) / 1000.0 : 0.0;
-        last_tick = snap->tick_ms;
+        snap->time_ms = timebase::now_ms();
+        const double dt = last_time > 0 ? (snap->time_ms - last_time) / 1000.0 : 0.0;
+        last_time = snap->time_ms;
 
         SnapshotPtr prev = history_.latest();
         for (auto& s : samplers)
             if (s) s->sample(*snap, prev.get(), dt);
 
         history_.push(std::move(snap));
-        WaitForSingleObject(wake, period_ms_);
+
+        deadline += period_ms_;
+        const double now = timebase::now_ms();
+        // After a long stall (sleep, debugger) resync instead of firing a burst.
+        if (deadline < now) deadline = now + period_ms_;
+        // Default Windows timer granularity is ~15.6 ms; the timestamp, not the
+        // wake-up, is what the graphs use, so a coarse wake is harmless.
+        WaitForSingleObject(wake, DWORD(deadline - now));
     }
     CloseHandle(wake);
 }

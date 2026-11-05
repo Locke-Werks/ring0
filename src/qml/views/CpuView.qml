@@ -122,7 +122,7 @@ Item {
                         anchors.rightMargin: 12
                         y: 7
                         property real shown: cell.load
-                        Behavior on shown { NumberAnimation { duration: 950; easing.type: Easing.InOutSine } }
+                        Behavior on shown { NumberAnimation { duration: 1000; easing.type: Easing.Linear } }
                         text: shown.toFixed(0) + "%"
                         color: Qt.tint(Theme.dim, Qt.rgba(view.hue.r, view.hue.g, view.hue.b, Math.min(1, cell.load / 60)))
                         font.family: Theme.font

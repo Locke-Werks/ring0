@@ -58,6 +58,11 @@ public:
     // "gpu", "disk", "net", "commit", "core:N", "disk:N[:r|w]", "net:N[:rx|tx]", "gpu:A[:E]".
     Q_INVOKABLE QList<double> series(const QString& metric, int n) const;
 
+    // Same series with each sample's timestamp (timebase ms), for renderers that
+    // position by time. Up to n entries, oldest first, honoring the scrub offset.
+    struct TimedValue { double time_ms; double value; };
+    std::vector<TimedValue> timedSeries(const QString& metric, int n) const;
+
 signals:
     void changed();
     void scrubChanged();

@@ -87,6 +87,7 @@ struct Gpu {
 struct Snapshot {
     std::uint64_t seq = 0;
     std::uint64_t tick_ms = 0;    // GetTickCount64 at sample time
+    double time_ms = 0;           // timebase::now_ms() at sample start; graphs position by this
     std::vector<Process> processes;
     std::vector<CoreLoad> cores;
     float cpu_total = 0;

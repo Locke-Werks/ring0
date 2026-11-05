@@ -9,17 +9,17 @@ layout(location = 0) out vec4 fragColor;
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     float qt_Opacity;
-    float t;
-    float stepX;
+    float age;
+    float pxPerMs;
     float halfWidth;
     vec4 color;
     vec2 size;
-    float scroll;
+    float top;
     float fillOn;
     float glow;
     float dotRadius;
     float glowRadius;
-    float pad;
+    float edgeValue;
 };
 
 void main()

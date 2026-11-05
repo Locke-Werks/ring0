@@ -24,7 +24,7 @@ Item {
                     height: bar.height
                     width: bar.total > 0 ? bar.width * Math.max(0, modelData.value) / bar.total : 0
                     color: modelData.color
-                    Behavior on width { NumberAnimation { duration: 950; easing.type: Easing.InOutSine } }
+                    Behavior on width { NumberAnimation { duration: 1000; easing.type: Easing.Linear } }
                 }
             }
         }
