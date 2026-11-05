@@ -1,0 +1,21 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "msvc-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "C:/Qt/6.11.3/msvc2022_64",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    { "name": "msvc-debug",   "inherits": "msvc-base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "msvc-release", "inherits": "msvc-base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } }
+  ],
+  "buildPresets": [
+    { "name": "msvc-debug",   "configurePreset": "msvc-debug" },
+    { "name": "msvc-release", "configurePreset": "msvc-release" }
+  ]
+}
