@@ -8,7 +8,9 @@ env:
   # Pin it: one place to bump, and a Forge release cannot change what this job
   # produces. v0.4.1 is current; [[options]], when and hook checks need >= v0.4.0.
   FORGE_VERSION: v0.4.1
-  QT_VERSION: 6.11.3
+  # aqtinstall (behind install-qt-action) cannot resolve Qt 6.11 yet: Qt changed
+  # the repository layout for that series. 6.10.2 builds and runs identically.
+  QT_VERSION: 6.10.2
   # PawnIO setup is third-party and signed by its author. Pinned by digest so a
   # replaced release asset cannot slip into the installer.
   PAWNIO_URL: https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe
@@ -38,7 +40,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           arch: win64_msvc2022_64
           modules: qtshadertools
-          # CMakePresets.json points at C:\Qt\<version>\msvc2022_64.
+          # Lands at C:\Qt\<version>\msvc2022_64; the Build step passes that path.
           dir: 'C:\'
           cache: true
 
@@ -48,13 +50,14 @@ jobs:
 
       - name: Build
         run: |
-          cmake --preset msvc-release
+          cmake --preset msvc-release -DCMAKE_PREFIX_PATH=C:/Qt/${{ env.QT_VERSION }}/msvc2022_64
           cmake --build --preset msvc-release
 
       # cmake --install runs Qt's deploy script, which puts the Qt runtime, QML
       # modules and plugins beside ring0.exe. Everything under stage is the payload.
+      # Qt 6.10's deploy step rejects a relative prefix.
       - name: Stage payload
-        run: cmake --install out/msvc-release --prefix stage
+        run: cmake --install out/msvc-release --prefix "${{ github.workspace }}/stage"
 
       # Only ring0.exe is ours to sign. Not recursing keeps the signature off the
       # redistributed Qt runtime; PawnIO's setup is added after this step.

@@ -29,8 +29,7 @@ set_source_files_properties(src/qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE T
 qt_add_qml_module(ring0
     URI Ring0
     VERSION 1.0
-    QML_FILES ${RING0_QML}
-    RESOURCE_PREFIX /)
+    QML_FILES ${RING0_QML})
 
 file(GLOB RING0_SHADERS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS
     src/gpu/shaders/*.vert src/gpu/shaders/*.frag)
@@ -57,7 +56,22 @@ add_custom_command(TARGET ring0 POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/assets/pawnio $<TARGET_FILE_DIR:ring0>/pawnio)
 
+# Flat layout: the exe and the Qt runtime at the install root, plugins and QML
+# modules beside them. Every directory is named explicitly because the defaults
+# moved between Qt versions (6.10 deploys into bin\, stranding ring0.exe away
+# from its DLLs; 6.11 deploys flat).
 install(TARGETS ring0 RUNTIME DESTINATION .)
 install(DIRECTORY assets/pawnio DESTINATION .)
-qt_generate_deploy_qml_app_script(TARGET ring0 OUTPUT_SCRIPT ring0_deploy NO_UNSUPPORTED_PLATFORM_ERROR)
+qt_generate_deploy_script(
+    TARGET ring0
+    OUTPUT_SCRIPT ring0_deploy
+    CONTENT "
+qt_deploy_runtime_dependencies(
+    EXECUTABLE \"$<TARGET_FILE_NAME:ring0>\"
+    BIN_DIR .
+    LIB_DIR .
+    PLUGINS_DIR plugins
+    QML_DIR qml
+    DEPLOY_TOOL_OPTIONS --qmldir \"${CMAKE_CURRENT_SOURCE_DIR}/src/qml\"
+)")
 install(SCRIPT ${ring0_deploy})
