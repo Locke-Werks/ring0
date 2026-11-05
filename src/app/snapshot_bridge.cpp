@@ -208,6 +208,12 @@ QVariantMap SnapshotBridge::memory() const
     m[u"paged"_s] = double(v.paged_pool);
     m[u"nonpaged"_s] = double(v.nonpaged_pool);
     m[u"faults"_s] = double(v.page_faults_per_sec);
+    m[u"standby"_s] = double(v.standby);
+    m[u"modified"_s] = double(v.modified);
+    m[u"freeList"_s] = double(v.free_list);
+    QVariantList dimms;
+    for (float t : v.dimm_temps_c) dimms.push_back(double(t));
+    m[u"dimmTemps"_s] = dimms;
     return m;
 }
 

@@ -11,8 +11,16 @@ Item {
     property var m: SnapshotBridge.seq >= 0 ? SnapshotBridge.memory() : ({})
 
     readonly property real used: m.used || 0
-    readonly property real cached: Math.min(m.cached || 0, m.available || 0)
-    readonly property real free: Math.max(0, (m.available || 0) - cached)
+    // Page lists partition RAM exactly; fall back to the coarse split only if the
+    // list query was unavailable.
+    readonly property bool lists: (m.standby || 0) > 0
+    readonly property real standby: lists ? m.standby : Math.min(m.cached || 0, m.available || 0)
+    readonly property real modified: lists ? (m.modified || 0) : 0
+    readonly property real free: lists ? (m.freeList || 0) : Math.max(0, (m.available || 0) - standby)
+    readonly property real active: Math.max(0, (m.total || 0) - standby - modified - free)
+    readonly property real cached: standby + modified
+    readonly property color modHue: Qt.hsla((hue.hslHue + 0.92) % 1.0, 0.55, 0.55, 1)
+    readonly property var dimms: m.dimmTemps || []
 
     function compact(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "m" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : Math.round(n).toString() }
 
@@ -36,9 +44,16 @@ Item {
                 spacing: 40
                 Readout { label: "in use"; value: view.used; format: Theme.bytes; hue: view.hue; size: 40 }
                 Readout { label: "available"; value: view.m.available || 0; format: Theme.bytes; size: 24 }
-                Readout { label: "standby cache"; value: view.cached; format: Theme.bytes; size: 24 }
+                Readout { label: "cached"; value: view.cached; format: Theme.bytes; size: 24 }
                 Readout { label: "committed"; value: view.m.commitUsed || 0; format: (v) => Theme.bytes(v) + " / " + Theme.bytes(view.m.commitLimit || 0); size: 24 }
                 Readout { label: "page faults/s"; value: view.m.faults || 0; format: view.compact; size: 24 }
+                Readout {
+                    visible: view.dimms.length > 0
+                    label: "dimm temps"
+                    value: view.dimms.length ? Math.max(...view.dimms) : 0
+                    format: () => view.dimms.map(t => t.toFixed(0) + "°").join("  ") + " C"
+                    size: 24
+                }
             }
         }
 
@@ -59,8 +74,9 @@ Item {
                     Layout.preferredHeight: 10
                     total: view.m.total || 1
                     segments: [
-                        { value: view.used, color: view.hue },
-                        { value: view.cached, color: view.cacheHue },
+                        { value: view.active, color: view.hue },
+                        { value: view.modified, color: view.modHue },
+                        { value: view.standby, color: view.cacheHue },
                         { value: view.free, color: Theme.line }
                     ]
                 }
@@ -68,8 +84,9 @@ Item {
                     spacing: 22
                     Repeater {
                         model: [
-                            { c: view.hue, t: "in use " + Theme.bytes(view.used) },
-                            { c: view.cacheHue, t: "standby " + Theme.bytes(view.cached) },
+                            { c: view.hue, t: "in use " + Theme.bytes(view.active) },
+                            { c: view.modHue, t: "modified " + Theme.bytes(view.modified) },
+                            { c: view.cacheHue, t: "standby " + Theme.bytes(view.standby) },
                             { c: Theme.line, t: "free " + Theme.bytes(view.free) }
                         ]
                         delegate: Row {

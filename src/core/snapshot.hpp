@@ -54,7 +54,13 @@ struct Memory {
     std::uint64_t commit_limit = 0, commit_used = 0;
     std::uint64_t paged_pool = 0, nonpaged_pool = 0;
     std::uint64_t cached = 0;
+    // Memory manager page lists (bytes), from SystemMemoryListInformation. These
+    // partition physical RAM without overlap; 0 when the query is unavailable.
+    std::uint64_t standby = 0;    // reclaimable cache, all eight priorities
+    std::uint64_t modified = 0;   // dirty, waiting to be written; counted as in use
+    std::uint64_t free_list = 0;  // free + zeroed
     float page_faults_per_sec = 0;
+    std::vector<float> dimm_temps_c;  // per populated DDR5 module (SPD hub sensor); empty if unavailable
 };
 
 struct Disk {
