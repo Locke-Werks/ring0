@@ -3,6 +3,8 @@
 
 #include <windows.h>
 #include <winioctl.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 
 #include <algorithm>
 #include <array>
@@ -11,6 +13,7 @@
 #include <format>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace ring0 {
 namespace {
@@ -43,7 +46,6 @@ struct Slot {
     std::wstring  model;
     bool          have_prev = false;
     std::uint64_t prev_read = 0, prev_write = 0;
-    std::int64_t  prev_idle = 0, prev_query = 0;
     std::uint64_t prev_ms = 0;
 };
 
@@ -105,9 +107,58 @@ float rate(std::uint64_t now, std::uint64_t then, double secs) {
     return static_cast<float>(static_cast<double>(now - then) / secs);
 }
 
+// Active time comes from the PhysicalDisk "% Idle Time" counter, the source
+// Task Manager uses. DISK_PERFORMANCE.IdleTime is only updated when a disk goes
+// idle, so a delta of it cannot measure an interval that was busy.
+class ActiveTime {
+public:
+    ActiveTime()
+    {
+        if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) { query_ = nullptr; return; }
+        if (PdhAddEnglishCounterW(query_, L"\\PhysicalDisk(*)\\% Idle Time", 0, &counter_) != ERROR_SUCCESS) {
+            PdhCloseQuery(query_);
+            query_ = nullptr;
+            return;
+        }
+        PdhCollectQueryData(query_);  // rate counters need a first sample to diff against
+    }
+    ~ActiveTime() { if (query_) PdhCloseQuery(query_); }
+    ActiveTime(const ActiveTime&) = delete;
+    ActiveTime& operator=(const ActiveTime&) = delete;
+
+    // Busy percent per disk number, -1 where the counter has no instance.
+    std::array<float, 32> collect()
+    {
+        std::array<float, 32> busy;
+        busy.fill(-1.0f);
+        if (!query_ || PdhCollectQueryData(query_) != ERROR_SUCCESS) return busy;
+        DWORD bytes = 0, count = 0;
+        if (PdhGetFormattedCounterArrayW(counter_, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &bytes, &count, nullptr) != PDH_MORE_DATA)
+            return busy;
+        std::vector<std::byte> buf(bytes);
+        auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+        if (PdhGetFormattedCounterArrayW(counter_, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &bytes, &count, items) != ERROR_SUCCESS)
+            return busy;
+        for (DWORD i = 0; i < count; ++i) {
+            // Instances are "<disk number> <volumes>", e.g. "1 C: D:"; "_Total" is skipped.
+            const wchar_t* name = items[i].szName;
+            if (!name || name[0] < L'0' || name[0] > L'9') continue;
+            const int n = _wtoi(name);
+            if (n < 0 || n >= 32 || items[i].FmtValue.CStatus != ERROR_SUCCESS) continue;
+            busy[std::size_t(n)] = float(std::clamp(100.0 - items[i].FmtValue.doubleValue, 0.0, 100.0));
+        }
+        return busy;
+    }
+
+private:
+    PDH_HQUERY query_ = nullptr;
+    PDH_HCOUNTER counter_ = nullptr;
+};
+
 class DiskSampler final : public Sampler {
 public:
     void sample(Snapshot& out, const Snapshot*, double) override {
+        const auto busy = active_.collect();
         out.disks.clear();
         out.disk_bps_total = 0;
         const std::uint64_t now_ms = GetTickCount64();
@@ -137,26 +188,17 @@ public:
 
             const auto rd = static_cast<std::uint64_t>(dp.BytesRead.QuadPart);
             const auto wr = static_cast<std::uint64_t>(dp.BytesWritten.QuadPart);
-            const std::int64_t idle  = dp.IdleTime.QuadPart;
-            const std::int64_t query = dp.QueryTime.QuadPart;
 
             if (s.have_prev && now_ms > s.prev_ms) {
                 const double secs = static_cast<double>(now_ms - s.prev_ms) / 1000.0;
                 d.read_bps  = rate(rd, s.prev_read, secs);
                 d.write_bps = rate(wr, s.prev_write, secs);
-                const std::int64_t dq = query - s.prev_query;
-                const std::int64_t di = idle - s.prev_idle;
-                if (dq > 0 && di >= 0) {
-                    const double busy = 1.0 - static_cast<double>(di) / static_cast<double>(dq);
-                    d.active_pct = static_cast<float>(std::clamp(busy, 0.0, 1.0) * 100.0);
-                }
+                if (busy[std::size_t(i)] >= 0) d.active_pct = busy[std::size_t(i)];
             }
 
             s.have_prev  = true;
             s.prev_read  = rd;
             s.prev_write = wr;
-            s.prev_idle  = idle;
-            s.prev_query = query;
             s.prev_ms    = now_ms;
 
             out.disk_bps_total += d.read_bps + d.write_bps;
@@ -166,6 +208,7 @@ public:
 
 private:
     std::array<Slot, kMaxPhysicalDrives> slots_{};
+    ActiveTime active_;
 };
 
 } // namespace

@@ -51,6 +51,13 @@ if(MSVC)
 endif()
 
 
+# PawnIO modules (LGPL-2.1, signed by the PawnIO project) are loaded from a
+# pawnio folder beside the exe to read CPU temperature.
+add_custom_command(TARGET ring0 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/pawnio $<TARGET_FILE_DIR:ring0>/pawnio)
+
 install(TARGETS ring0 RUNTIME DESTINATION .)
+install(DIRECTORY assets/pawnio DESTINATION .)
 qt_generate_deploy_qml_app_script(TARGET ring0 OUTPUT_SCRIPT ring0_deploy NO_UNSUPPORTED_PLATFORM_ERROR)
 install(SCRIPT ${ring0_deploy})

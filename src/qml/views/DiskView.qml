@@ -31,6 +31,7 @@ Item {
                 valueA: d.read || 0
                 valueB: d.write || 0
                 extra: (d.active || 0).toFixed(0) + "% active"
+                extraLevel: (d.active || 0) / 100
             }
         }
     }
