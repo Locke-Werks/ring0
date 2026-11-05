@@ -90,6 +90,8 @@ int main(int argc, char* argv[])
             const auto i = names.indexOf(args[at + 1]);
             if (i >= 0) w->setProperty("view", int(i));
         }
+        if (const auto ip = args.indexOf(QStringLiteral("--inspect")); ip >= 0 && ip + 1 < args.size())
+            QMetaObject::invokeMethod(w, "inspectPid", Q_ARG(QVariant, args[ip + 1].toInt()));
 
         // RING0_FRAMELOG=1 reports slow frames, how long the GUI thread spent
         // handling the most recent sample, and how far after that sample the

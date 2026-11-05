@@ -56,6 +56,23 @@ double metric_of(const Snapshot& s, const QString& metric)
         if (parts.size() > 2) return parts[2] == u"rx" ? n->rx_bps : n->tx_bps;
         return n->rx_bps + n->tx_bps;
     }
+    if (parts[0] == u"proc" && parts.size() > 2) {
+        // One process's history, by pid. A pid reused within the window would splice
+        // two processes; the forensic view only ever looks at a live, recent pid.
+        const auto pid = parts[1].toUInt();
+        for (const auto& p : s.processes) {
+            if (p.pid != pid) continue;
+            const auto& k = parts[2];
+            if (k == u"cpu") return p.cpu_pct;
+            if (k == u"mem") return double(p.working_set);
+            if (k == u"disk") return p.disk_bps;
+            if (k == u"net") return p.net_bps;
+            if (k == u"gpu") return p.gpu_pct;
+            if (k == u"vram") return double(p.gpu_dedicated);
+            return 0.0;
+        }
+        return 0.0;
+    }
     if (parts[0] == u"vram") {
         auto* g = at(s.gpus, i);
         return g ? double(g->dedicated_used) : 0.0;
@@ -187,6 +204,14 @@ double SnapshotBridge::avgClockMhz() const
     int n = 0;
     for (float m : s->core_mhz) if (m > 0) { sum += m; ++n; }
     return n ? sum / n : -1;
+}
+
+QString SnapshotBridge::processName(int pid) const
+{
+    if (auto s = current())
+        for (const auto& p : s->processes)
+            if (int(p.pid) == pid) return QString::fromStdWString(p.image_name);
+    return {};
 }
 
 double SnapshotBridge::coreClockMhz(int core) const

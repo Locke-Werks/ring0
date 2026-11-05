@@ -68,6 +68,7 @@ public:
     double cpuPowerW() const;
     double avgClockMhz() const;     // mean effective clock of cores that report one; -1 if none
     Q_INVOKABLE double coreClockMhz(int core) const;
+    Q_INVOKABLE QString processName(int pid) const;   // empty if not running
 
     Q_INVOKABLE double coreLoad(int core) const;
     // Detail for the device views; plain maps so QML can bind without extra types.

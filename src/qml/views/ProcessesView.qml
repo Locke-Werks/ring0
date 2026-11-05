@@ -317,7 +317,7 @@ Item {
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: Theme.line } }
         MenuItem { text: "open file location"; enabled: menu.path !== ""; onTriggered: ProcessActions.openLocation(menu.path) }
         MenuItem { text: "copy pid"; onTriggered: ProcessActions.copyText(String(menu.pid)) }
-        MenuItem { text: "inspect stacks"; onTriggered: view.inspect(menu.pid, { name: menu.name, path: menu.path, commandLine: menu.cmd }) }
+        MenuItem { text: "inspect"; onTriggered: view.inspect(menu.pid, { name: menu.name, path: menu.path, commandLine: menu.cmd }) }
     }
 
 

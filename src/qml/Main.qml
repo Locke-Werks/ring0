@@ -18,6 +18,7 @@ Window {
     property int view: 0
     property string filterText: ""
     property int filterScope: 0   // 0 all, 1 user, 2 system
+    function inspectPid(p) { forensic.inspect(p, {}); view = 6 }
 
     Shortcut { sequence: "Ctrl+F"; onActivated: filter.focusInput() }
     Repeater {

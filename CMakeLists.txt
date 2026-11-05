@@ -14,7 +14,7 @@ add_library(ring0_core STATIC ${RING0_CORE_SOURCES})
 target_include_directories(ring0_core PUBLIC src)
 target_compile_definitions(ring0_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(ring0_core PUBLIC
-    ntdll advapi32 iphlpapi pdh psapi wintrust crypt32 dbghelp shell32 ole32 dxgi tdh)
+    ntdll advapi32 iphlpapi pdh psapi wintrust crypt32 dbghelp shell32 ole32 uuid ws2_32 dxgi tdh)
 
 file(GLOB RING0_APP_SOURCES CONFIGURE_DEPENDS src/app/*.cpp src/gpu/*.cpp)
 # Listing the manifest as a source makes Qt skip generating its own.

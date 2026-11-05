@@ -41,12 +41,17 @@ public:
     // as [{ tid, frames: [{ module, symbol, offset, address }] }].
     Q_INVOKABLE void captureStacks(int pid);
 
+    // Full identity, modules, connections and findings for one process, gathered
+    // off the UI thread; arrives in `inspected`.
+    Q_INVOKABLE void inspect(int pid);
+
 signals:
     void failed(const QString& action, int pid, const QString& message);
     void succeeded(const QString& action, int pid);
     void trustChanged();
     void stacksReady(int pid, const QVariantList& threads);
     void stacksFailed(int pid, const QString& message);
+    void inspected(int pid, const QVariantMap& detail);
 
 private:
     bool report(const QString& action, int pid, const std::expected<void, std::wstring>& r);
