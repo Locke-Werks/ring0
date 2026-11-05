@@ -62,7 +62,13 @@ Window {
             FilterBar {
                 id: filter
                 Layout.fillWidth: true
-                Layout.preferredHeight: 56
+                // Only the process list filters; elsewhere the bar would be dead space.
+                Layout.preferredHeight: win.view === 0 ? 56 : 0
+                Behavior on Layout.preferredHeight { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                opacity: win.view === 0 ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 160 } }
+                clip: true
+                visible: Layout.preferredHeight > 0.5
                 hue: Theme.views[win.view].hue
                 onTextEdited: (t) => win.filterText = t
                 onScopePicked: (s) => win.filterScope = s
