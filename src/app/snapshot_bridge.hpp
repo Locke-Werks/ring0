@@ -25,6 +25,7 @@ class SnapshotBridge : public QObject {
     Q_PROPERTY(double netBps READ netBps NOTIFY changed)
     Q_PROPERTY(int coreCount READ coreCount NOTIFY changed)
     Q_PROPERTY(int processCount READ processCount NOTIFY changed)
+    Q_PROPERTY(double cpuTempC READ cpuTempC NOTIFY changed)
 
 public:
     static SnapshotBridge* instance();
@@ -45,10 +46,16 @@ public:
     double netBps() const;
     int coreCount() const;
     int processCount() const;
+    double cpuTempC() const;
 
     Q_INVOKABLE double coreLoad(int core) const;
+    // Detail for the device views; plain maps so QML can bind without extra types.
+    Q_INVOKABLE QVariantMap memory() const;
+    Q_INVOKABLE QVariantList disks() const;
+    Q_INVOKABLE QVariantList ifaces() const;
+    Q_INVOKABLE QVariantList gpus() const;
     // Oldest-to-newest values of one metric for a graph. metric: "cpu", "mem",
-    // "gpu", "disk", "net", "core:N".
+    // "gpu", "disk", "net", "commit", "core:N", "disk:N[:r|w]", "net:N[:rx|tx]", "gpu:A[:E]".
     Q_INVOKABLE QList<double> series(const QString& metric, int n) const;
 
 signals:

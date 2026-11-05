@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "app/icon_provider.hpp"
 #include "app/snapshot_bridge.hpp"
 
 #include <QGuiApplication>
@@ -42,13 +43,26 @@ int main(int argc, char* argv[])
     SnapshotBridge::instance();  // start sampling before the first frame
 
     QQmlApplicationEngine engine;
+    register_icon_provider(engine);
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
                      [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule(QStringLiteral("Ring0"), QStringLiteral("Main"));
     if (engine.rootObjects().isEmpty()) return 1;
 
-    if (auto* w = qobject_cast<QWindow*>(engine.rootObjects().first()))
+    if (auto* w = qobject_cast<QWindow*>(engine.rootObjects().first())) {
         style_native_window(w);
+        // --view <name> opens on a given view; used for scripted screenshots.
+        const auto args = QCoreApplication::arguments();
+        const auto at = args.indexOf(QStringLiteral("--view"));
+        if (at >= 0 && at + 1 < args.size()) {
+            static const QStringList names = {
+                QStringLiteral("processes"), QStringLiteral("cpu"), QStringLiteral("memory"),
+                QStringLiteral("disk"), QStringLiteral("network"), QStringLiteral("gpu"),
+                QStringLiteral("forensic")};
+            const auto i = names.indexOf(args[at + 1]);
+            if (i >= 0) w->setProperty("view", int(i));
+        }
+    }
 
     return QGuiApplication::exec();
 }

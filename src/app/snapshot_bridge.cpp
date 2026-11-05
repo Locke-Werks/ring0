@@ -20,9 +20,40 @@ double metric_of(const Snapshot& s, const QString& metric)
         const auto& m = s.memory;
         return m.phys_total ? 100.0 * double(m.phys_total - m.phys_avail) / double(m.phys_total) : 0.0;
     }
-    if (metric.startsWith(u"core:")) {
-        const auto i = metric.sliced(5).toInt();
-        return i >= 0 && std::size_t(i) < s.cores.size() ? s.cores[std::size_t(i)].total : 0.0;
+    if (metric == u"commit") {
+        const auto& m = s.memory;
+        return m.commit_limit ? 100.0 * double(m.commit_used) / double(m.commit_limit) : 0.0;
+    }
+
+    // Indexed metrics: "core:N", "disk:N:r|w", "net:N:rx|tx", "gpu:A", "gpu:A:E".
+    const auto parts = metric.split(u':');
+    if (parts.size() < 2) return 0.0;
+    const auto at = [](const auto& v, qsizetype i) { return i >= 0 && std::size_t(i) < v.size() ? &v[std::size_t(i)] : nullptr; };
+    const auto i = parts[1].toInt();
+    if (parts[0] == u"core") {
+        auto* c = at(s.cores, i);
+        return c ? c->total : 0.0;
+    }
+    if (parts[0] == u"disk") {
+        auto* d = at(s.disks, i);
+        if (!d) return 0.0;
+        if (parts.size() > 2) return parts[2] == u"r" ? d->read_bps : d->write_bps;
+        return d->read_bps + d->write_bps;
+    }
+    if (parts[0] == u"net") {
+        auto* n = at(s.ifaces, i);
+        if (!n) return 0.0;
+        if (parts.size() > 2) return parts[2] == u"rx" ? n->rx_bps : n->tx_bps;
+        return n->rx_bps + n->tx_bps;
+    }
+    if (parts[0] == u"gpu") {
+        auto* g = at(s.gpus, i);
+        if (!g) return 0.0;
+        if (parts.size() > 2) {
+            auto* e = at(g->engines, parts[2].toInt());
+            return e ? e->pct : 0.0;
+        }
+        return g->total_pct;
     }
     return 0.0;
 }
@@ -78,12 +109,82 @@ double SnapshotBridge::netBps() const { auto s = current(); return s ? s->net_bp
 double SnapshotBridge::memPct() const { auto s = current(); return s ? metric_of(*s, u"mem"_s) : 0; }
 int SnapshotBridge::coreCount() const { auto s = current(); return s ? int(s->cores.size()) : 0; }
 int SnapshotBridge::processCount() const { auto s = current(); return s ? int(s->processes.size()) : 0; }
+double SnapshotBridge::cpuTempC() const { auto s = current(); return s ? s->cpu_temp_c : -1; }
 
 double SnapshotBridge::coreLoad(int core) const
 {
     auto s = current();
     if (!s || core < 0 || std::size_t(core) >= s->cores.size()) return 0;
     return s->cores[std::size_t(core)].total;
+}
+
+QVariantMap SnapshotBridge::memory() const
+{
+    QVariantMap m;
+    auto s = current();
+    if (!s) return m;
+    const auto& v = s->memory;
+    m[u"total"_s] = double(v.phys_total);
+    m[u"used"_s] = double(v.phys_total - v.phys_avail);
+    m[u"available"_s] = double(v.phys_avail);
+    m[u"cached"_s] = double(v.cached);
+    m[u"commitUsed"_s] = double(v.commit_used);
+    m[u"commitLimit"_s] = double(v.commit_limit);
+    m[u"paged"_s] = double(v.paged_pool);
+    m[u"nonpaged"_s] = double(v.nonpaged_pool);
+    m[u"faults"_s] = double(v.page_faults_per_sec);
+    return m;
+}
+
+QVariantList SnapshotBridge::disks() const
+{
+    QVariantList out;
+    auto s = current();
+    if (!s) return out;
+    for (const auto& d : s->disks)
+        out.push_back(QVariantMap{
+            {u"name"_s, QString::fromStdWString(d.name)},
+            {u"model"_s, QString::fromStdWString(d.model)},
+            {u"read"_s, double(d.read_bps)},
+            {u"write"_s, double(d.write_bps)},
+            {u"active"_s, double(d.active_pct)}});
+    return out;
+}
+
+QVariantList SnapshotBridge::ifaces() const
+{
+    QVariantList out;
+    auto s = current();
+    if (!s) return out;
+    for (const auto& n : s->ifaces)
+        out.push_back(QVariantMap{
+            {u"name"_s, QString::fromStdWString(n.name)},
+            {u"link"_s, double(n.link_bps)},
+            {u"rx"_s, double(n.rx_bps)},
+            {u"tx"_s, double(n.tx_bps)}});
+    return out;
+}
+
+QVariantList SnapshotBridge::gpus() const
+{
+    QVariantList out;
+    auto s = current();
+    if (!s) return out;
+    for (const auto& g : s->gpus) {
+        QVariantList engines;
+        for (const auto& e : g.engines)
+            engines.push_back(QVariantMap{{u"name"_s, QString::fromStdWString(e.name)}, {u"pct"_s, double(e.pct)}});
+        out.push_back(QVariantMap{
+            {u"name"_s, QString::fromStdWString(g.name)},
+            {u"total"_s, double(g.total_pct)},
+            {u"temp"_s, double(g.temp_c)},
+            {u"dedicatedUsed"_s, double(g.dedicated_used)},
+            {u"dedicatedTotal"_s, double(g.dedicated_total)},
+            {u"sharedUsed"_s, double(g.shared_used)},
+            {u"sharedTotal"_s, double(g.shared_total)},
+            {u"engines"_s, engines}});
+    }
+    return out;
 }
 
 QList<double> SnapshotBridge::series(const QString& metric, int n) const

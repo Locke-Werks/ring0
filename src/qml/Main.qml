@@ -6,8 +6,9 @@ import Ring0
 
 Window {
     id: win
-    width: 1440
-    height: 900
+    // Open at most 85% of the work area so the first view is never clipped.
+    width: Math.min(1440, Screen.desktopAvailableWidth * 0.85)
+    height: Math.min(900, Screen.desktopAvailableHeight * 0.85)
     minimumWidth: 900
     minimumHeight: 560
     visible: true
@@ -57,13 +58,17 @@ Window {
                 Layout.fillHeight: true
                 currentIndex: win.view
 
-                ProcessesView { filterText: win.filterText; filterScope: win.filterScope }
+                ProcessesView {
+                    filterText: win.filterText
+                    filterScope: win.filterScope
+                    onInspect: (pid, info) => { forensic.inspect(pid, info); win.view = 6 }
+                }
                 CpuView {}
                 MemoryView {}
                 DiskView {}
                 NetworkView {}
                 GpuView {}
-                ForensicView {}
+                ForensicView { id: forensic }
             }
 
             Scrubber {
@@ -72,5 +77,12 @@ Window {
                 hue: Theme.views[win.view].hue
             }
         }
+    }
+
+    Toast { id: toast }
+    Connections {
+        target: ProcessActions
+        function onFailed(action, pid, message) { toast.show(action + (pid > 0 ? " " + pid : "") + " failed: " + message, true) }
+        function onSucceeded(action, pid) { if (action !== "open location") toast.show(action + (pid > 0 ? " " + pid : ""), false) }
     }
 }
