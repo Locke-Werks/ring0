@@ -1,0 +1,156 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  # Pin it: one place to bump, and a Forge release cannot change what this job
+  # produces. v0.4.1 is current; [[options]], when and hook checks need >= v0.4.0.
+  FORGE_VERSION: v0.4.1
+  QT_VERSION: 6.11.3
+  # PawnIO setup is third-party and signed by its author. Pinned by digest so a
+  # replaced release asset cannot slip into the installer.
+  PAWNIO_URL: https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe
+  PAWNIO_SHA256: 1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032
+
+jobs:
+  release:
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The installer's product version must match the tag, or upgrade detection
+      # and Add/Remove Programs would disagree with the release name.
+      - name: Check version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $cfg = (Select-String -Path installer.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ($tag -ne $cfg) { throw "tag $tag does not match installer.toml version $cfg" }
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          modules: qtshadertools
+          # CMakePresets.json points at C:\Qt\<version>\msvc2022_64.
+          dir: 'C:\'
+          cache: true
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        run: |
+          cmake --preset msvc-release
+          cmake --build --preset msvc-release
+
+      # cmake --install runs Qt's deploy script, which puts the Qt runtime, QML
+      # modules and plugins beside ring0.exe. Everything under stage is the payload.
+      - name: Stage payload
+        run: cmake --install out/msvc-release --prefix stage
+
+      # Only ring0.exe is ours to sign. Not recursing keeps the signature off the
+      # redistributed Qt runtime; PawnIO's setup is added after this step.
+      - name: Sign ring0.exe
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net
+          trusted-signing-account-name: specterpoint
+          certificate-profile-name: specterpoint
+          files-folder: stage
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Add PawnIO setup
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:PAWNIO_URL -OutFile stage/PawnIO_setup.exe
+          $hash = (Get-FileHash stage/PawnIO_setup.exe -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:PAWNIO_SHA256) { throw "PawnIO_setup.exe digest $hash does not match the pin" }
+          $sig = Get-AuthenticodeSignature stage/PawnIO_setup.exe
+          if ($sig.Status -ne 'Valid') { throw "PawnIO_setup.exe signature is $($sig.Status)" }
+          "PawnIO_setup.exe: $($sig.SignerCertificate.Subject)"
+
+      - name: Verify payload signature
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature stage/ring0.exe
+          "ring0.exe: $($sig.Status)  $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "ring0.exe is $($sig.Status)" }
+
+      - name: Fetch Forge
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:FORGE_VERSION --repo Locke-Werks/Forge --pattern '*.exe' --dir tools
+          foreach ($name in 'lwforge.exe', 'lwstub.exe') {
+            $sig = Get-AuthenticodeSignature "tools/$name"
+            "$name : $($sig.Status)"
+            if ($sig.Status -ne 'Valid') { throw "tools/$name is $($sig.Status)" }
+          }
+
+      - name: Forge the installer
+        shell: pwsh
+        run: |
+          ./tools/lwforge.exe build `
+            --config installer.toml `
+            --payload stage `
+            --stub tools/lwstub.exe `
+            --out "dist/ring0-${{ github.ref_name }}-setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw "lwforge exited $LASTEXITCODE" }
+
+      - name: Sign the installer
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net
+          trusted-signing-account-name: specterpoint
+          certificate-profile-name: specterpoint
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          $setup = "dist/ring0-${{ github.ref_name }}-setup.exe"
+          $sig = Get-AuthenticodeSignature $setup
+          "installer: $($sig.Status)  $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "installer is $($sig.Status)" }
+          # Proves the certificate table appended by signing did not orphan the container.
+          ./tools/lwforge.exe inspect $setup
+          if ($LASTEXITCODE -ne 0) { throw "the signed installer cannot read its own container" }
+          # The option surface a deployment would use. The runner may fail a
+          # preflight (sudo is not enabled there), so print the report either way
+          # and only fail on an option the installer does not declare.
+          $report = & $setup --check-only /O:pawnio=off 2>&1 | Out-String
+          $report
+          if ($report -match 'not a declared option|unknown option') { throw "option surface changed:`n$report" }
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" "dist/ring0-${{ github.ref_name }}-setup.exe" `
+            --repo "${{ github.repository }}" `
+            --title "ring0 ${{ github.ref_name }}" `
+            --notes-file .github/release-notes.md

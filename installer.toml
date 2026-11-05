@@ -48,6 +48,31 @@ name            = "ring0.exe"
 restart_manager = true
 fail            = "ring0 is running. Close it and try again."
 
+[ui]
+license_text = """
+ring0 is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+ring0 is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details:
+https://www.gnu.org/licenses/gpl-3.0.html
+
+The bundled PawnIO modules are LGPL-2.1; the PawnIO driver is GPL-2.0 with an
+IOCTL exception. Both are by namazso, https://pawnio.eu
+"""
+
+# CPU temperature, package power, effective clocks and DDR5 module temperatures
+# need a kernel driver. PawnIO is signed and open source, and shared with
+# LibreHardwareMonitor and others, so it is offered rather than forced.
+[[options]]
+id      = "pawnio"
+label   = "Install the PawnIO driver for CPU and memory sensors"
+detail  = "Adds a signed kernel driver from pawnio.eu. Without it, temperatures, power and clocks are not shown; everything else works."
+default = true
+
 [[actions]]
 type = "arp"
 
@@ -55,3 +80,19 @@ type = "arp"
 type   = "shortcut"
 target = '{InstallDir}\ring0.exe'
 name   = "ring0"
+
+# Not vital: ring0 runs without the driver, and an existing PawnIO install makes
+# the setup refuse, which is not a failure of this install. -silent shows no UI
+# even on error, so an unattended deployment never stalls here.
+[[hooks.post_install]]
+id          = "install_pawnio"
+when        = "pawnio"
+run         = 'payload:PawnIO_setup.exe'
+args        = ["-install", "-silent"]
+as          = "installer"
+sha256      = "auto"
+expect_exit = [0, 3010]
+timeout_ms  = 180000
+vital       = false
+
+# PawnIO is deliberately left installed on uninstall: other tools share it.
