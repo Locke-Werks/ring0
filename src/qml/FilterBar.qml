@@ -58,7 +58,7 @@ Rectangle {
                 required property int index
                 required property string modelData
                 readonly property bool on: bar.scope === index
-                Layout.preferredWidth: 72
+                Layout.preferredWidth: bar.width < 800 ? 56 : 72
                 Layout.preferredHeight: 30
                 radius: 15
                 color: on ? bar.hue : "transparent"

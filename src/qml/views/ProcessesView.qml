@@ -17,15 +17,21 @@ Item {
     // Re-read on every sample: the first evaluation runs before any snapshot exists.
     readonly property real memScale: SnapshotBridge.seq >= 0 ? Math.max(256 * 1048576, (SnapshotBridge.memory().total || 0) / 16) : 1
 
+    // Lowest-priority columns drop first as the window narrows, so the name
+    // column never gets squeezed into ellipses.
+    readonly property bool showGpu:  width >= 980
+    readonly property bool showNet:  width >= 860
+    readonly property bool showDisk: width >= 740
+    readonly property bool showPid:  width >= 620
     readonly property var columns: [
         { key: "name",   label: "name",    width: -1 },
-        { key: "pid",    label: "pid",     width: 70 },
+        { key: "pid",    label: "pid",     width: 70,  show: showPid },
         { key: "cpu",    label: "cpu",     width: 96 },
         { key: "memory", label: "memory",  width: 110 },
-        { key: "disk",   label: "disk",    width: 104 },
-        { key: "net",    label: "network", width: 104 },
-        { key: "gpu",    label: "gpu",     width: 90 }
-    ]
+        { key: "disk",   label: "disk",    width: 104, show: showDisk },
+        { key: "net",    label: "network", width: 104, show: showNet },
+        { key: "gpu",    label: "gpu",     width: 90,  show: showGpu }
+    ].filter(c => c.show !== false)
 
     FilterProxy {
         id: proxy
@@ -207,6 +213,7 @@ Item {
                         }
                     }
                     Text {
+                        visible: view.showPid
                         Layout.preferredWidth: 70
                         horizontalAlignment: Text.AlignRight
                         rightPadding: 8
@@ -217,9 +224,9 @@ Item {
                     }
                     MetricCell { Layout.preferredWidth: 96;  Layout.fillHeight: true; hue: Theme.views[1].hue; value: row.cpu;    scale: 100; text: row.cpu.toFixed(1) + "%" }
                     MetricCell { Layout.preferredWidth: 110; Layout.fillHeight: true; hue: Theme.views[2].hue; value: row.memory; scale: view.memScale; text: Theme.bytes(row.memory) }
-                    MetricCell { Layout.preferredWidth: 104; Layout.fillHeight: true; hue: Theme.views[3].hue; value: row.disk;   scale: 50 * 1048576; text: row.disk > 0 ? Theme.rate(row.disk) : "0" }
-                    MetricCell { Layout.preferredWidth: 104; Layout.fillHeight: true; hue: Theme.views[4].hue; value: row.net;    scale: 12 * 1048576; text: row.net > 0 ? Theme.rate(row.net) : "0" }
-                    MetricCell { Layout.preferredWidth: 90;  Layout.fillHeight: true; hue: Theme.views[5].hue; value: row.gpu;    scale: 100; text: row.gpu.toFixed(1) + "%" }
+                    MetricCell { visible: view.showDisk; Layout.preferredWidth: 104; Layout.fillHeight: true; hue: Theme.views[3].hue; value: row.disk;   scale: 50 * 1048576; text: row.disk > 0 ? Theme.rate(row.disk) : "0" }
+                    MetricCell { visible: view.showNet; Layout.preferredWidth: 104; Layout.fillHeight: true; hue: Theme.views[4].hue; value: row.net;    scale: 12 * 1048576; text: row.net > 0 ? Theme.rate(row.net) : "0" }
+                    MetricCell { visible: view.showGpu; Layout.preferredWidth: 90;  Layout.fillHeight: true; hue: Theme.views[5].hue; value: row.gpu;    scale: 100; text: row.gpu.toFixed(1) + "%" }
                 }
 
                 HoverHandler { id: hover }

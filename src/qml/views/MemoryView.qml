@@ -16,14 +16,15 @@ Item {
 
         RowLayout {
             Layout.fillWidth: true
-            Layout.preferredHeight: 120
+            // Wrapped readouts need more height on narrow windows.
+            Layout.preferredHeight: view.width < 1100 ? 190 : 120
             spacing: 14
             Panel {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 hue: view.hue
                 heat: (view.m.used || 0) / (view.m.total || 1)
-                RowLayout {
+                Flow {
                     anchors.fill: parent
                     anchors.margins: 16
                     spacing: 36
@@ -32,7 +33,6 @@ Item {
                     Readout { label: "cached"; value: view.m.cached || 0; format: Theme.bytes; size: 24 }
                     Readout { label: "committed"; value: view.m.commitUsed || 0; format: (v) => Theme.bytes(v) + " / " + Theme.bytes(view.m.commitLimit || 0); size: 24 }
                     Readout { label: "page faults/s"; value: view.m.faults || 0; size: 24 }
-                    Item { Layout.fillWidth: true }
                 }
             }
         }

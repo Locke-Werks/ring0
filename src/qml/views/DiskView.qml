@@ -11,7 +11,7 @@ Item {
     GridLayout {
         anchors.fill: parent
         anchors.margins: 20
-        columns: view.disks.length > 2 ? 2 : 1
+        columns: Math.max(1, Math.min(view.disks.length > 2 ? 2 : 1, Math.floor(width / 520)))
         rowSpacing: 14
         columnSpacing: 14
         Repeater {

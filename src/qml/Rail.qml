@@ -9,6 +9,7 @@ Rectangle {
     id: rail
     color: Theme.surface
     property int current: 0
+    property bool compact: false
     signal selected(int index)
 
     readonly property var readouts: [
@@ -29,15 +30,6 @@ Rectangle {
         anchors.topMargin: 14
         spacing: 2
 
-        Text {
-            Layout.leftMargin: 18
-            Layout.bottomMargin: 14
-            text: "ring0"
-            color: Theme.accent
-            font.family: Theme.font
-            font.pixelSize: 20
-            font.weight: Font.DemiBold
-        }
 
         Repeater {
             model: Theme.views
@@ -47,7 +39,8 @@ Rectangle {
                 required property var modelData
                 readonly property bool active: rail.current === index
                 Layout.fillWidth: true
-                Layout.preferredHeight: 52
+                Layout.preferredHeight: rail.compact ? 40 : 52
+                Behavior on Layout.preferredHeight { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
 
                 Rectangle {
                     anchors.fill: parent
@@ -66,7 +59,7 @@ Rectangle {
                 }
 
                 Sparkline {
-                    visible: rail.metrics[entry.index] !== ""
+                    visible: !rail.compact && rail.metrics[entry.index] !== ""
                     anchors.fill: parent
                     anchors.leftMargin: 8
                     anchors.rightMargin: 8
@@ -86,6 +79,7 @@ Rectangle {
                     font.pixelSize: 14
                 }
                 Text {
+                    visible: !rail.compact
                     anchors.right: parent.right
                     anchors.rightMargin: 20
                     y: 9

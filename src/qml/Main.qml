@@ -28,13 +28,27 @@ Window {
         }
     }
 
+    TitleBar {
+        id: titleBar
+        anchors.left: parent.left
+        anchors.right: parent.right
+        viewName: Theme.views[win.view].key
+        hue: Theme.views[win.view].hue
+    }
+
     RowLayout {
-        anchors.fill: parent
+        anchors.top: titleBar.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         spacing: 0
 
         Rail {
             Layout.fillHeight: true
-            Layout.preferredWidth: Theme.railWidth
+            // Compact below ~1100 px: labels only, no readouts or sparklines.
+            compact: win.width < 1100
+            Layout.preferredWidth: compact ? 120 : Theme.railWidth
+            Behavior on Layout.preferredWidth { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
             current: win.view
             onSelected: (i) => win.view = i
         }
