@@ -28,6 +28,10 @@ class SnapshotBridge : public QObject {
     Q_PROPERTY(double cpuTempC READ cpuTempC NOTIFY changed)
     Q_PROPERTY(double maxProcessMemory READ maxProcessMemory NOTIFY changed)
     Q_PROPERTY(double maxProcessCpu READ maxProcessCpu NOTIFY changed)
+    Q_PROPERTY(double cpuKernel READ cpuKernel NOTIFY changed)
+    Q_PROPERTY(double threadCount READ threadCount NOTIFY changed)
+    Q_PROPERTY(double handleCount READ handleCount NOTIFY changed)
+    Q_PROPERTY(double uptimeSeconds READ uptimeSeconds NOTIFY changed)
 
 public:
     static SnapshotBridge* instance();
@@ -51,6 +55,10 @@ public:
     double cpuTempC() const;
     double maxProcessMemory() const;
     double maxProcessCpu() const;
+    double cpuKernel() const;      // machine-wide kernel share, same scale as cpuTotal
+    double threadCount() const;
+    double handleCount() const;
+    double uptimeSeconds() const;
 
     Q_INVOKABLE double coreLoad(int core) const;
     // Detail for the device views; plain maps so QML can bind without extra types.

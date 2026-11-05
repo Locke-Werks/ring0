@@ -20,6 +20,12 @@ double metric_of(const Snapshot& s, const QString& metric)
         const auto& m = s.memory;
         return m.phys_total ? 100.0 * double(m.phys_total - m.phys_avail) / double(m.phys_total) : 0.0;
     }
+    if (metric == u"cpuk") {
+        if (s.cores.empty()) return 0.0;
+        double k = 0;
+        for (const auto& c : s.cores) k += c.kernel;
+        return k / double(s.cores.size());
+    }
     if (metric == u"commit") {
         const auto& m = s.memory;
         return m.commit_limit ? 100.0 * double(m.commit_used) / double(m.commit_limit) : 0.0;
@@ -33,6 +39,10 @@ double metric_of(const Snapshot& s, const QString& metric)
     if (parts[0] == u"core") {
         auto* c = at(s.cores, i);
         return c ? c->total : 0.0;
+    }
+    if (parts[0] == u"corek") {
+        auto* c = at(s.cores, i);
+        return c ? c->kernel : 0.0;
     }
     if (parts[0] == u"disk") {
         auto* d = at(s.disks, i);
@@ -127,6 +137,26 @@ double SnapshotBridge::maxProcessCpu() const
             if (p.pid != 0) m = std::max(m, double(p.cpu_pct));
     return m;
 }
+
+double SnapshotBridge::cpuKernel() const { auto s = current(); return s ? metric_of(*s, u"cpuk"_s) : 0; }
+
+double SnapshotBridge::threadCount() const
+{
+    auto s = current();
+    double n = 0;
+    if (s) for (const auto& p : s->processes) n += p.thread_count;
+    return n;
+}
+
+double SnapshotBridge::handleCount() const
+{
+    auto s = current();
+    double n = 0;
+    if (s) for (const auto& p : s->processes) n += p.handle_count;
+    return n;
+}
+
+double SnapshotBridge::uptimeSeconds() const { auto s = current(); return s ? double(s->tick_ms) / 1000.0 : 0; }
 
 double SnapshotBridge::cpuTempC() const { auto s = current(); return s ? s->cpu_temp_c : -1; }
 
