@@ -32,6 +32,7 @@ struct Process {
     std::uint64_t private_bytes = 0;
     std::uint64_t cpu_100ns = 0;         // kernel + user, cumulative
     std::uint64_t gpu_100ns = 0;         // cumulative across adapters and engines
+    std::uint64_t gpu_dedicated = 0;     // bytes of dedicated VRAM this process holds, all adapters
     std::uint64_t io_read_bytes = 0;
     std::uint64_t io_write_bytes = 0;
     std::uint64_t etw_disk_bytes = 0;    // cumulative, from the ETW DiskIo provider

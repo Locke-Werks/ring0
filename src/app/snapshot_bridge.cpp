@@ -56,6 +56,10 @@ double metric_of(const Snapshot& s, const QString& metric)
         if (parts.size() > 2) return parts[2] == u"rx" ? n->rx_bps : n->tx_bps;
         return n->rx_bps + n->tx_bps;
     }
+    if (parts[0] == u"vram") {
+        auto* g = at(s.gpus, i);
+        return g ? double(g->dedicated_used) : 0.0;
+    }
     if (parts[0] == u"gpu") {
         auto* g = at(s.gpus, i);
         if (!g) return 0.0;
@@ -135,6 +139,14 @@ double SnapshotBridge::maxProcessCpu() const
     if (s)
         for (const auto& p : s->processes)
             if (p.pid != 0) m = std::max(m, double(p.cpu_pct));
+    return m;
+}
+
+double SnapshotBridge::maxProcessVram() const
+{
+    auto s = current();
+    double m = 0;
+    if (s) for (const auto& p : s->processes) m = std::max(m, double(p.gpu_dedicated));
     return m;
 }
 

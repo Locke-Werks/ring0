@@ -6,8 +6,12 @@
 #include <d3dkmthk.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 
 #include <algorithm>
+#include <cwchar>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -112,13 +116,17 @@ struct Engine {
     bool          has_prev = false;
 };
 
+using PciKey = std::tuple<UINT, UINT, UINT, UINT, UINT, UINT, UINT>;
+
 struct Adapter {
+    PciKey                 pci{};
     AdapterHandle          handle;
     LUID                   luid{};
     std::wstring           name;
     UINT                   vendor = 0;
     UINT                   node_count = 0;
-    ComPtr<IDXGIAdapter3>  dxgi;
+    std::uint64_t          dedicated_total = 0;
+    std::uint64_t          shared_total = 0;
     std::vector<Engine>    engines;
     bool                   perfdata_ok = true;
 };
@@ -141,17 +149,82 @@ bool same_luid(const LUID& a, const LUID& b) {
     return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
 }
 
+std::uint64_t luid_key(const LUID& l) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(l.HighPart)) << 32) | l.LowPart;
+}
+
+class PdhQuery {
+public:
+    PdhQuery() = default;
+    PdhQuery(const PdhQuery&) = delete;
+    PdhQuery& operator=(const PdhQuery&) = delete;
+    ~PdhQuery() { if (q_) PdhCloseQuery(q_); }
+    bool open() { return PdhOpenQueryW(nullptr, 0, &q_) == ERROR_SUCCESS || (q_ = nullptr, false); }
+    PDH_HQUERY get() const { return q_; }
+
+private:
+    PDH_HQUERY q_ = nullptr;
+};
+
+// Parses "luid_0xHHHHHHHH_0xLLLLLLLL" starting at p; returns the packed LUID or 0.
+std::uint64_t parse_luid(const wchar_t* p) {
+    if (!p || std::wcsncmp(p, L"luid_", 5) != 0) return 0;
+    wchar_t* end = nullptr;
+    const auto hi = std::wcstoull(p + 5, &end, 16);
+    if (!end || *end != L'_') return 0;
+    const auto lo = std::wcstoull(end + 1, &end, 16);
+    return (hi << 32) | (lo & 0xFFFFFFFFull);
+}
+
+// PdhGetFormattedCounterArray with the size probe and the buffer it fills.
+std::vector<std::byte> read_array(PDH_HCOUNTER c, DWORD& count) {
+    std::vector<std::byte> buf;
+    count = 0;
+    if (!c) return buf;
+    DWORD bytes = 0;
+    if (PdhGetFormattedCounterArrayW(c, PDH_FMT_LARGE, &bytes, &count, nullptr) != PDH_MORE_DATA) return buf;
+    buf.resize(bytes);
+    if (PdhGetFormattedCounterArrayW(c, PDH_FMT_LARGE, &bytes, &count,
+            reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data())) != ERROR_SUCCESS) {
+        buf.clear();
+        count = 0;
+    }
+    return buf;
+}
+
+template <class F>
+void for_each_item(PDH_HCOUNTER c, F&& f) {
+    DWORD count = 0;
+    auto buf = read_array(c, count);
+    const auto* items = reinterpret_cast<const PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    for (DWORD i = 0; i < count; ++i) {
+        if (items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA && items[i].FmtValue.CStatus != PDH_CSTATUS_NEW_DATA)
+            continue;
+        if (items[i].FmtValue.largeValue < 0) continue;
+        f(items[i].szName, static_cast<std::uint64_t>(items[i].FmtValue.largeValue));
+    }
+}
+
 class GpuSampler final : public Sampler {
 public:
     GpuSampler() {
         if (!kmt_.load()) return;
         enumerate();
         init_nvapi();
+        init_pdh();
     }
 
     void sample(Snapshot& out, const Snapshot* prev, double dt_seconds) override {
         if (adapters_.empty()) return;
         const double dt_100ns = dt_seconds > 0 ? dt_seconds * 1e7 : 0;
+
+        const bool pdh_ok = pdh_.get() && PdhCollectQueryData(pdh_.get()) == ERROR_SUCCESS;
+        std::unordered_map<std::uint64_t, std::uint64_t> dedicated, shared;
+        if (pdh_ok) {
+            // Several phys_N instances can share one LUID on linked adapters, so sum them.
+            for_each_item(c_dedicated_, [&](const wchar_t* n, std::uint64_t v) { dedicated[parse_luid(n)] += v; });
+            for_each_item(c_shared_, [&](const wchar_t* n, std::uint64_t v) { shared[parse_luid(n)] += v; });
+        }
 
         out.gpus.reserve(adapters_.size());
         float machine = 0;
@@ -159,17 +232,54 @@ public:
             Gpu g;
             g.name = a.name;
             sample_engines(a, g, dt_100ns);
-            sample_memory(a, g);
+            g.dedicated_total = a.dedicated_total;
+            g.shared_total = a.shared_total;
+            if (auto it = dedicated.find(luid_key(a.luid)); it != dedicated.end()) g.dedicated_used = it->second;
+            if (auto it = shared.find(luid_key(a.luid)); it != shared.end()) g.shared_used = it->second;
             g.temp_c = sample_temp(a);
             machine = std::max(machine, g.total_pct);
             out.gpus.push_back(std::move(g));
         }
         out.gpu_total = machine;
 
-        sample_processes(out, prev, dt_100ns);
+        if (pdh_ok) {
+            sample_processes(out, prev, dt_100ns);
+            sample_process_memory(out);
+        }
     }
 
 private:
+    void init_pdh() {
+        if (adapters_.empty() || !pdh_.open()) return;
+        if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &c_dedicated_) != ERROR_SUCCESS)
+            c_dedicated_ = nullptr;
+        if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Adapter Memory(*)\\Shared Usage", 0, &c_shared_) != ERROR_SUCCESS)
+            c_shared_ = nullptr;
+        // Local Usage is what a process has resident in VRAM. Dedicated Usage credits
+        // every process that opens a shared surface with its full size, so a streamer
+        // mapping desktop surfaces read 42 GB on a 24 GB card.
+        if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Process Memory(*)\\Local Usage", 0, &c_proc_dedicated_) != ERROR_SUCCESS)
+            c_proc_dedicated_ = nullptr;
+        if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Engine(*)\\Utilization Percentage", 0, &c_engine_) != ERROR_SUCCESS)
+            c_engine_ = nullptr;
+        // Utilization is a rate; prime it so the first real sample has a baseline.
+        PdhCollectQueryData(pdh_.get());
+    }
+
+    void sample_process_memory(Snapshot& out) const {
+        std::unordered_map<std::uint32_t, std::uint64_t> by_pid;
+        for_each_item(c_proc_dedicated_, [&](const wchar_t* n, std::uint64_t v) {
+            if (!n || std::wcsncmp(n, L"pid_", 4) != 0) return;
+            wchar_t* end = nullptr;
+            const auto pid = std::wcstoul(n + 4, &end, 10);
+            if (end == n + 4) return;
+            by_pid[static_cast<std::uint32_t>(pid)] += v;
+        });
+        if (by_pid.empty()) return;
+        for (auto& p : out.processes)
+            if (auto it = by_pid.find(p.pid); it != by_pid.end()) p.gpu_dedicated = it->second;
+    }
+
     void enumerate() {
         D3DKMT_ENUMADAPTERS2 e{};
         if (kmt_.enum_adapters2(&e) != 0 || e.NumAdapters == 0) return;
@@ -205,12 +315,37 @@ private:
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
             if (desc.VendorId == kVendorMicrosoft && desc.DeviceId == kBasicRenderDevice) continue;
 
+            // An indirect display driver (virtual monitors for streaming hosts) gets its own
+            // LUID, but DXGI describes it with the identity of the GPU that renders for it, so
+            // it reads as a second copy of that GPU. It has no engines or memory of its own.
+            if (kmt_.query_adapter_info) {
+                D3DKMT_ADAPTERTYPE type{};
+                D3DKMT_QUERYADAPTERINFO qai{};
+                qai.hAdapter = handle.get();
+                qai.Type = KMTQAITYPE_ADAPTERTYPE;
+                qai.pPrivateDriverData = &type;
+                qai.PrivateDriverDataSize = sizeof(type);
+                if (kmt_.query_adapter_info(&qai) == 0 &&
+                    (!type.RenderSupported || type.IndirectDisplayDevice))
+                    continue;
+            }
+
+            // Belt and braces for anything else that aliases one device: the same LUID, or
+            // the same PCI identity at the same bus location, is one physical adapter.
+            const auto pci = pci_key(handle.get(), desc);
+            const bool dup = std::ranges::any_of(adapters_, [&](const Adapter& o) {
+                return same_luid(o.luid, info.AdapterLuid) || (pci != PciKey{} && o.pci == pci);
+            });
+            if (dup) continue;
+
             Adapter a;
             a.handle = std::move(handle);
             a.luid = info.AdapterLuid;
             a.name = desc.Description;
             a.vendor = desc.VendorId;
-            match.As(&a.dxgi);
+            a.pci = pci;
+            a.dedicated_total = desc.DedicatedVideoMemory;
+            a.shared_total = desc.SharedSystemMemory;
 
             D3DKMT_QUERYSTATISTICS q{};
             q.Type = D3DKMT_QUERYSTATISTICS_ADAPTER;
@@ -291,18 +426,17 @@ private:
         }
     }
 
-    static void sample_memory(Adapter& a, Gpu& g) {
-        if (!a.dxgi) return;
-        DXGI_QUERY_VIDEO_MEMORY_INFO local{};
-        if (SUCCEEDED(a.dxgi->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
-            g.dedicated_used = local.CurrentUsage;
-            g.dedicated_total = local.Budget;
-        }
-        DXGI_QUERY_VIDEO_MEMORY_INFO shared{};
-        if (SUCCEEDED(a.dxgi->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared))) {
-            g.shared_used = shared.CurrentUsage;
-            g.shared_total = shared.Budget;
-        }
+    // Zero when the bus location is unknown, so virtual adapters never collide on it.
+    PciKey pci_key(D3DKMT_HANDLE h, const DXGI_ADAPTER_DESC1& d) const {
+        if (!kmt_.query_adapter_info) return {};
+        D3DKMT_ADAPTERADDRESS addr{};
+        D3DKMT_QUERYADAPTERINFO qai{};
+        qai.hAdapter = h;
+        qai.Type = KMTQAITYPE_ADAPTERADDRESS;
+        qai.pPrivateDriverData = &addr;
+        qai.PrivateDriverDataSize = sizeof(addr);
+        if (kmt_.query_adapter_info(&qai) != 0 || addr.BusNumber == 0xFFFFFFFF) return {};
+        return {d.VendorId, d.DeviceId, d.SubSysId, d.Revision, addr.BusNumber, addr.DeviceNumber, addr.FunctionNumber};
     }
 
     float sample_temp(Adapter& a) {
@@ -330,23 +464,32 @@ private:
         return -1;
     }
 
-    std::uint64_t process_running_time(HANDLE process) const {
-        std::uint64_t total = 0;
-        for (const auto& a : adapters_) {
-            for (UINT n = 0; n < a.node_count; ++n) {
-                D3DKMT_QUERYSTATISTICS q{};
-                q.Type = D3DKMT_QUERYSTATISTICS_PROCESS_NODE;
-                q.AdapterLuid = a.luid;
-                q.hProcess = process;
-                q.QueryProcessNode.NodeId = n;
-                if (kmt_.query_statistics(&q) != 0) break;
-                total += static_cast<std::uint64_t>(q.QueryResult.ProcessNodeInformation.RunningTime.QuadPart);
-            }
-        }
-        return total;
-    }
-
+    // D3DKMT_QUERYSTATISTICS_PROCESS_NODE rejects a PROCESS_QUERY_LIMITED_INFORMATION handle
+    // with STATUS_INVALID_PARAMETER, and with full query rights it returned negative running
+    // times here; protected game processes refuse full rights anyway. The engine counter is
+    // what Task Manager reads and needs no process handle at all.
     void sample_processes(Snapshot& out, const Snapshot* prev, double dt_100ns) const {
+        if (!c_engine_) return;
+        DWORD count = 0;
+        DWORD bytes = 0;
+        if (PdhGetFormattedCounterArrayW(c_engine_, PDH_FMT_DOUBLE, &bytes, &count, nullptr) != PDH_MORE_DATA) return;
+        std::vector<std::byte> buf(bytes);
+        auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+        if (PdhGetFormattedCounterArrayW(c_engine_, PDH_FMT_DOUBLE, &bytes, &count, items) != ERROR_SUCCESS) return;
+
+        // Task Manager sums the instances of one engine type and shows the busiest type.
+        std::unordered_map<std::uint32_t, std::unordered_map<std::wstring, double>> by_pid;
+        for (DWORD i = 0; i < count; ++i) {
+            const auto& it = items[i];
+            if (it.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA && it.FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
+            if (it.FmtValue.doubleValue <= 0 || !it.szName || std::wcsncmp(it.szName, L"pid_", 4) != 0) continue;
+            wchar_t* end = nullptr;
+            const auto pid = std::wcstoul(it.szName + 4, &end, 10);
+            if (end == it.szName + 4) continue;
+            const wchar_t* type = std::wcsstr(it.szName, L"_engtype_");
+            by_pid[static_cast<std::uint32_t>(pid)][type ? type + 9 : L""] += it.FmtValue.doubleValue;
+        }
+
         std::unordered_map<std::uint32_t, std::pair<std::uint64_t, std::uint64_t>> before;
         if (prev) {
             before.reserve(prev->processes.size());
@@ -356,26 +499,30 @@ private:
 
         for (auto& p : out.processes) {
             if (p.pid == 0) continue;
-            UniqueHandle h(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, p.pid));
-            if (!h.h) continue;
-            p.gpu_100ns = process_running_time(h.h);
+            double pct = 0;
+            if (auto f = by_pid.find(p.pid); f != by_pid.end())
+                for (const auto& [type, v] : f->second) pct = std::max(pct, v);
+            pct = std::clamp(pct, 0.0, 100.0);
+            p.gpu_pct = static_cast<float>(pct);
 
-            if (dt_100ns <= 0) continue;
-            auto it = before.find(p.pid);
-            if (it == before.end() || it->second.first != p.create_time) continue;
-            if (p.gpu_100ns < it->second.second) continue;
-            // Summing engines can exceed wall time when several run in parallel; clamp to
-            // keep the column on the same 0..100 scale as the adapter view.
-            p.gpu_pct = static_cast<float>(std::clamp(
-                static_cast<double>(p.gpu_100ns - it->second.second) / dt_100ns * 100.0, 0.0, 100.0));
+            // Integrated from the rate so the cumulative column survives the source change.
+            auto b = before.find(p.pid);
+            const std::uint64_t base = (b != before.end() && b->second.first == p.create_time) ? b->second.second : 0;
+            p.gpu_100ns = base + static_cast<std::uint64_t>(pct / 100.0 * dt_100ns);
         }
     }
+
 
     Kmt                  kmt_;
     std::vector<Adapter> adapters_;
     UniqueModule         nvapi_;
     void*                nv_gpu_ = nullptr;
     NvThermalFn          nv_thermal_ = nullptr;
+    PdhQuery             pdh_;
+    PDH_HCOUNTER         c_dedicated_ = nullptr;
+    PDH_HCOUNTER         c_shared_ = nullptr;
+    PDH_HCOUNTER         c_proc_dedicated_ = nullptr;
+    PDH_HCOUNTER         c_engine_ = nullptr;
 };
 
 } // namespace

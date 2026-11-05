@@ -37,6 +37,7 @@ public:
         NetRole,
         GpuRole,
         CreateTimeRole,
+        VramRole,
     };
     Q_ENUM(Role)
 

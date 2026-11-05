@@ -69,6 +69,7 @@ QVariant ProcessModel::data(const QModelIndex& index, int role) const
     case NetRole:          return double(p.net_bps);
     case GpuRole:          return double(p.gpu_pct);
     case CreateTimeRole:   return QVariant::fromValue<quint64>(p.create_time);
+    case VramRole:         return double(p.gpu_dedicated);
     default:               return {};
     }
 }
@@ -94,6 +95,7 @@ QHash<int, QByteArray> ProcessModel::roleNames() const
         {NetRole, "net"},
         {GpuRole, "gpu"},
         {CreateTimeRole, "createTime"},
+        {VramRole, "vram"},
     };
 }
 
