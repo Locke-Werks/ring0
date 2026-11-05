@@ -2,6 +2,7 @@
 #include "app/icon_provider.hpp"
 #include "app/snapshot_bridge.hpp"
 #include "app/window_chrome.hpp"
+#include "core/elevate.hpp"
 #include "core/timebase.hpp"
 
 #include <QIcon>
@@ -40,6 +41,11 @@ void style_native_window(QWindow* w)
 
 int main(int argc, char* argv[])
 {
+    // Before Qt, threads or windows: an unelevated launch only relaunches
+    // through sudo and waits, so it should own nothing worth tearing down.
+    if (int code = 0; ring0::elevate::gate(code) == ring0::elevate::Gate::Exit)
+        return code;
+
     // D3D12 by default; QSG_RHI_BACKEND in the environment still overrides for testing.
     if (qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND"))
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D12);

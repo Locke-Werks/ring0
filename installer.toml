@@ -1,0 +1,57 @@
+# ring0: a GPU-rendered Windows task manager.
+#
+# Payload is the Qt deployment produced by `cmake --install` (windeployqt):
+# ring0.exe plus the Qt runtime beside it.
+
+[product]
+name         = "ring0"
+version      = "0.2.0"
+publisher    = "Locke Werks"
+description  = "Native Windows task manager, rendered on the GPU."
+copyright    = "Copyright (c) 2026 Locke Werks. GPL-3.0-or-later."
+url          = "https://github.com/Locke-Werks/ring0"
+# Same file the exe resource and the README header use.
+icon         = "assets/ring0.ico"
+# Stable across versions forever: upgrade detection and the single-instance
+# mutex key off it.
+upgrade_code = "8f3c2a71-5d4e-4b9a-a6c2-1e7f0d93b4a8"
+aumid        = "LockeWerks.ring0"
+
+[install]
+scope     = "machine"
+dir       = '{ProgramFiles}\ring0'
+elevation = "required"
+
+# Windows 11 24H2. Not cosmetic: ring0 elevates itself through sudo for
+# Windows, which does not exist before this build.
+[[preflight]]
+type = "os_build"
+min  = 26100
+fail = "Windows 11 24H2 (build 26100) or later is required. ring0 elevates itself through sudo for Windows, which older builds do not have."
+
+# Catches the out-of-box state, where sudo has never been configured and the
+# key does not exist. registry_value only tests presence, so a machine in
+# ForceNewWindow or DisableInput mode passes here; ring0 checks the actual mode
+# at launch and refuses with the exact fix, which is the real gate.
+[[preflight]]
+type   = "registry_value"
+hive   = "HKLM"
+key    = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo'
+name   = "Enabled"
+expect = true
+fail   = "sudo for Windows is not enabled. ring0 needs it in Inline mode. Open an administrator terminal and run: sudo config --enable normal"
+
+# Replacing the files under a running copy fails the copy halfway.
+[[preflight]]
+type            = "process_not_running"
+name            = "ring0.exe"
+restart_manager = true
+fail            = "ring0 is running. Close it and try again."
+
+[[actions]]
+type = "arp"
+
+[[actions]]
+type   = "shortcut"
+target = '{InstallDir}\ring0.exe'
+name   = "ring0"

@@ -113,18 +113,14 @@ Item {
             clip: true
             model: proxy
             boundsBehavior: Flickable.StopAtBounds
-            reuseItems: true
             cacheBuffer: 400
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
                 contentItem: Rectangle { implicitWidth: 4; radius: 2; color: Theme.faint }
             }
 
-            // Arrivals fade in, exits fade out, reorders glide: the table never jumps.
-            add: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 350 } }
-            remove: Transition { NumberAnimation { property: "opacity"; to: 0; duration: 250 } }
-            displaced: Transition { NumberAnimation { property: "y"; duration: 300; easing.type: Easing.OutCubic } }
-            move: Transition { NumberAnimation { property: "y"; duration: 300; easing.type: Easing.OutCubic } }
+            // No add/remove/displace transitions: with a filtered, re-sorting proxy
+            // and pooled delegates they left ghost rows and overlapping text.
 
             delegate: Item {
                 id: row
@@ -286,7 +282,7 @@ Item {
         }
 
         MenuItem { text: menu.suspended ? "resume" : "suspend"; onTriggered: menu.suspended ? ProcessActions.resume(menu.pid) : ProcessActions.suspend(menu.pid) }
-        MenuItem { text: "end process"; onTriggered: ProcessActions.terminate(menu.pid) }
+        MenuItem { text: "end process…"; onTriggered: confirmEnd.ask(menu.pid, menu.name) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: Theme.line } }
         Menu {
             title: "priority"
@@ -308,7 +304,48 @@ Item {
         MenuItem { text: "inspect stacks"; onTriggered: view.inspect(menu.pid, { name: menu.name, path: menu.path, commandLine: menu.cmd }) }
     }
 
-    Keys.onPressed: (e) => {
-        if (e.key === Qt.Key_Delete && view.selectedPid > 0) { ProcessActions.terminate(view.selectedPid); e.accepted = true }
+
+    // Ending a process is irreversible, so it always takes an explicit second click.
+    Rectangle {
+        id: confirmEnd
+        property int pid: -1
+        property string name: ""
+        function ask(p, n) { pid = p; name = n; visible = true }
+        visible: false
+        anchors.centerIn: parent
+        width: 420; height: 150
+        radius: Theme.radius
+        color: Theme.surface2
+        border.color: Theme.accent
+        z: 100
+        Column {
+            anchors.fill: parent
+            anchors.margins: 18
+            spacing: 18
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "end " + confirmEnd.name + " (pid " + confirmEnd.pid + ")? unsaved work in it is lost."
+                color: Theme.text
+                font.family: Theme.font
+                font.pixelSize: 14
+            }
+            Row {
+                anchors.right: parent.right
+                spacing: 10
+                Rectangle {
+                    width: 96; height: 32; radius: 16
+                    color: "transparent"; border.color: Theme.faint
+                    Text { anchors.centerIn: parent; text: "cancel"; color: Theme.text; font.family: Theme.font; font.pixelSize: 13 }
+                    TapHandler { onTapped: confirmEnd.visible = false }
+                }
+                Rectangle {
+                    width: 96; height: 32; radius: 16
+                    color: Theme.accent
+                    Text { anchors.centerIn: parent; text: "end it"; color: "#ffffff"; font.family: Theme.font; font.pixelSize: 13 }
+                    TapHandler { onTapped: { ProcessActions.terminate(confirmEnd.pid); confirmEnd.visible = false } }
+                }
+            }
+        }
     }
 }
