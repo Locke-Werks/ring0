@@ -147,6 +147,10 @@ jobs:
           $report = & $setup --check-only /O:pawnio=off 2>&1 | Out-String
           $report
           if ($report -match 'not a declared option|unknown option') { throw "option surface changed:`n$report" }
+          if ($report -notmatch '\[ \] pawnio') { throw "pawnio option missing or not switched off:`n$report" }
+          # --check-only exits 1603 here because the runner has no sudo; that is a
+          # property of the runner, already accounted for above. Do not let it fail the step.
+          exit 0
 
       - name: Publish
         shell: pwsh

@@ -72,6 +72,13 @@ qt_deploy_runtime_dependencies(
     LIB_DIR .
     PLUGINS_DIR plugins
     QML_DIR qml
-    DEPLOY_TOOL_OPTIONS --qmldir \"${CMAKE_CURRENT_SOURCE_DIR}/src/qml\"
+    DEPLOY_TOOL_OPTIONS --qmldir \"${CMAKE_CURRENT_SOURCE_DIR}/src/qml\" --no-compiler-runtime --no-translations
 )")
 install(SCRIPT ${ring0_deploy})
+
+# The MSVC runtime ships app-locally beside ring0.exe, Microsoft's supported
+# alternative to running vc_redist, which the deploy tool would otherwise bundle
+# and nothing would ever launch. The UI is English only, so no Qt translations.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION .)
+set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
+include(InstallRequiredSystemLibraries)
