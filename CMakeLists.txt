@@ -17,7 +17,8 @@ target_link_libraries(ring0_core PUBLIC
     ntdll advapi32 iphlpapi pdh psapi wintrust crypt32 dbghelp shell32 ole32 dxgi tdh)
 
 file(GLOB RING0_APP_SOURCES CONFIGURE_DEPENDS src/app/*.cpp src/gpu/*.cpp)
-qt_add_executable(ring0 WIN32 ${RING0_APP_SOURCES} res/ring0.rc)
+# Listing the manifest as a source makes Qt skip generating its own.
+qt_add_executable(ring0 WIN32 ${RING0_APP_SOURCES} res/ring0.rc res/ring0.manifest)
 # qmltyperegistrations includes headers by bare name, so the header dirs go on the path.
 target_include_directories(ring0 PRIVATE src src/app src/gpu)
 target_link_libraries(ring0 PRIVATE ring0_core Qt6::Core Qt6::Gui Qt6::Quick Qt6::Concurrent Qt6::GuiPrivate dwmapi)
@@ -49,8 +50,6 @@ if(MSVC)
     set_source_files_properties(${RING0_APP_SOURCES} PROPERTIES COMPILE_OPTIONS "/W4;/WX")
 endif()
 
-set_target_properties(ring0 PROPERTIES
-    LINK_FLAGS "/MANIFEST:EMBED /MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/res/ring0.manifest /MANIFESTUAC:NO")
 
 install(TARGETS ring0 RUNTIME DESTINATION .)
 qt_generate_deploy_qml_app_script(TARGET ring0 OUTPUT_SCRIPT ring0_deploy NO_UNSUPPORTED_PLATFORM_ERROR)

@@ -2,6 +2,7 @@
 #include "app/icon_provider.hpp"
 #include "app/snapshot_bridge.hpp"
 #include "app/window_chrome.hpp"
+#include "core/timebase.hpp"
 
 #include <QIcon>
 #include <QImage>
@@ -82,6 +83,31 @@ int main(int argc, char* argv[])
                 QStringLiteral("forensic")};
             const auto i = names.indexOf(args[at + 1]);
             if (i >= 0) w->setProperty("view", int(i));
+        }
+
+        // RING0_FRAMELOG=1 reports slow frames, how long the GUI thread spent
+        // handling the most recent sample, and how far after that sample the
+        // slow frame landed. Diagnostic only.
+        if (qEnvironmentVariableIsSet("RING0_FRAMELOG")) {
+            struct FrameLog { double last = 0, sample_at = 0, sample_cost = 0; };
+            auto* log = new FrameLog;
+            QObject::connect(SnapshotBridge::instance(), &SnapshotBridge::changed, w, [log] {
+                log->sample_at = ring0::timebase::now_ms();
+            });
+            // Cost of every handler connected after this one, measured from a queued probe.
+            QObject::connect(SnapshotBridge::instance(), &SnapshotBridge::changed, w, [log] {
+                QMetaObject::invokeMethod(qApp, [log] {
+                    log->sample_cost = ring0::timebase::now_ms() - log->sample_at;
+                }, Qt::QueuedConnection);
+            });
+            QObject::connect(w, &QQuickWindow::frameSwapped, w, [log] {
+                const double now = ring0::timebase::now_ms();
+                const double gap = log->last > 0 ? now - log->last : 0;
+                log->last = now;
+                if (gap > 20)
+                    qWarning("FRAME gap=%.1fms since_sample=%.1fms sample_handlers=%.1fms",
+                             gap, now - log->sample_at, log->sample_cost);
+            }, Qt::DirectConnection);
         }
     }
 
