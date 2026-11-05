@@ -83,7 +83,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.right: col.modelData.key === "name" ? undefined : parent.right
                             anchors.rightMargin: 8
-                            text: col.modelData.label + (col.active ? (proxy.descending ? "  â†“" : "  â†‘") : "")
+                            text: col.modelData.label + (col.active ? (proxy.descending ? "  ↓" : "  ↑") : "")
                             color: col.active ? view.hue : (ma.containsMouse ? Theme.text : Theme.dim)
                             font.family: Theme.font
                             font.pixelSize: 12
@@ -308,7 +308,7 @@ Item {
                 delegate: MenuItem {
                     required property int index
                     required property string modelData
-                    text: (menu.priority === index ? "â€¢  " : "    ") + modelData
+                    text: (menu.priority === index ? "•  " : "    ") + modelData
                     onTriggered: ProcessActions.setPriority(menu.pid, index)
                 }
             }
