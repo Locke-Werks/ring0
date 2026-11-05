@@ -4,6 +4,7 @@
 #include "history.h"
 #include "etw.h"
 #include "gpu.h"
+#include "thermal.h"
 #include "physdisk.h"
 #include "netif.h"
 #include <stdint.h>
@@ -194,6 +195,83 @@ static void path_cache_age(const snapshot_t *snap)
     }
 }
 
+/* Per-pid command-line cache. Same design as the image-path cache. Uses
+   NtQueryInformationProcess(ProcessCommandLineInformation=60). */
+#define ProcessCommandLineInformation 60
+
+struct cmdline_slot {
+    unsigned pid;
+    uint64_t create_time;
+    uint32_t cmdline;       /* intern handle */
+    uint32_t flags;
+};
+#define CMDLINE_SLOTS 1024
+static struct cmdline_slot *g_cmdlines;
+
+static void cmdlines_ensure(void)
+{
+    if (g_cmdlines) return;
+    g_cmdlines = (struct cmdline_slot *)VirtualAlloc(NULL,
+        sizeof(struct cmdline_slot) * CMDLINE_SLOTS,
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+}
+
+static uint32_t resolve_command_line(unsigned pid, uint64_t create_time)
+{
+    if (pid == 0 || !nt_qip) return 0;
+    cmdlines_ensure();
+    if (!g_cmdlines) return 0;
+    unsigned h = (pid * 2654435761u) & (CMDLINE_SLOTS - 1);
+    struct cmdline_slot *empty = NULL;
+    for (unsigned i = 0; i < CMDLINE_SLOTS; ++i) {
+        struct cmdline_slot *s = &g_cmdlines[(h + i) & (CMDLINE_SLOTS - 1)];
+        if (s->pid == pid && s->create_time == create_time) return s->cmdline;
+        if (s->pid == 0 && !empty) empty = s;
+        if (s->pid == 0) break;
+    }
+    if (!empty) return 0;
+
+    HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    uint32_t handle = 0;
+    if (ph) {
+        BYTE buf[4096];
+        ULONG ret = 0;
+        NTSTATUS st = nt_qip(ph, ProcessCommandLineInformation, buf, sizeof buf, &ret);
+        if (st == 0 && ret >= sizeof(UNICODE_STRING)) {
+            UNICODE_STRING *us = (UNICODE_STRING *)buf;
+            if (us->Buffer && us->Length > 0) {
+                handle = intern_str(us->Buffer, us->Length / sizeof(WCHAR));
+            }
+        }
+        CloseHandle(ph);
+    }
+    empty->pid = pid;
+    empty->create_time = create_time;
+    empty->cmdline = handle;
+    empty->flags = 1;
+    return handle;
+}
+
+static void cmdline_cache_age(const snapshot_t *snap)
+{
+    if (!g_cmdlines) return;
+    static uint64_t last_age_ms;
+    if (snap->timestamp - last_age_ms < 5000) return;
+    last_age_ms = snap->timestamp;
+    for (unsigned i = 0; i < CMDLINE_SLOTS; ++i) {
+        struct cmdline_slot *s = &g_cmdlines[i];
+        if (s->pid == 0) continue;
+        int alive = 0;
+        for (uint32_t j = 0; j < snap->n_processes; ++j) {
+            if (snap->processes[j].pid == s->pid &&
+                snap->processes[j].create_time == s->create_time) {
+                alive = 1; break;
+            }
+        }
+        if (!alive) { s->pid = 0; s->create_time = 0; s->cmdline = 0; }
+    }
+}
+
 /* Build a compact process table from NtQuerySystemInformation(SystemProcessInformation).
    The NT call returns a variable-sized blob (typically ~1 MB on a busy box) into
    `scratch`. We then walk the linked list and emit POD process_t entries into
@@ -222,12 +300,12 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
     }
     if (st != 0) return NULL;
 
-    /* first pass — count */
+    /* first pass — count (skip pid 0, the idle pseudo-process) */
     uint32_t n = 0;
     uint8_t *p = buf;
     for (;;) {
         SYSTEM_PROCESS_INFORMATION_R0 *spi = (SYSTEM_PROCESS_INFORMATION_R0 *)p;
-        ++n;
+        if ((ULONG_PTR)spi->UniqueProcessId != 0) ++n;
         if (spi->NextEntryOffset == 0) break;
         p += spi->NextEntryOffset;
     }
@@ -240,46 +318,64 @@ snapshot_t *snapshot_build(arena_t *dest, arena_t *scratch)
     snap->processes   = arena_alloc(dest, (size_t)n * sizeof(process_t), 16);
     if (!snap->processes) return NULL;
 
-    /* second pass — fill */
+    /* second pass — fill (pid 0 already excluded from count) */
     p = buf;
-    for (uint32_t i = 0; i < n; ++i) {
+    uint32_t i = 0;
+    for (;;) {
         SYSTEM_PROCESS_INFORMATION_R0 *spi = (SYSTEM_PROCESS_INFORMATION_R0 *)p;
-        process_t *pr = &snap->processes[i];
 
-        pr->pid           = (uint32_t)(ULONG_PTR)spi->UniqueProcessId;
-        pr->ppid          = (uint32_t)(ULONG_PTR)spi->InheritedFromUniqueProcessId;
-        pr->session_id    = spi->SessionId;
-        pr->thread_count  = spi->NumberOfThreads;
-        pr->handle_count  = spi->HandleCount;
-        pr->page_faults   = spi->PageFaultCount;
-        pr->_pad          = 0;
-        pr->working_set   = (uint64_t)spi->WorkingSetSize;
-        pr->virtual_size  = (uint64_t)spi->VirtualSize;
-        pr->cpu_100ns     = (uint64_t)(spi->KernelTime.QuadPart + spi->UserTime.QuadPart);
-        pr->io_read_bytes = (uint64_t)spi->ReadTransferCount.QuadPart;
-        pr->io_write_bytes= (uint64_t)spi->WriteTransferCount.QuadPart;
-        pr->io_other_bytes= (uint64_t)spi->OtherTransferCount.QuadPart;
-        pr->create_time   = (uint64_t)spi->CreateTime.QuadPart;
-        pr->cpu_pct       = 0;
-        pr->_pad2         = 0;
-        pr->_pad3         = 0;
+        if ((ULONG_PTR)spi->UniqueProcessId != 0 && i < n) {
+            process_t *pr = &snap->processes[i];
 
-        etw_counters_t ec;
-        etw_counters_for(pr->pid, &ec);
-        pr->etw_disk_total = ec.disk_read + ec.disk_write;
-        pr->etw_net_total  = ec.net_in    + ec.net_out;
-        pr->disk_bps       = 0;
-        pr->net_bps        = 0;
-        pr->image_path     = resolve_image_path(pr->pid, pr->create_time);
-        pr->gpu_pct        = 0;
-        pr->_pad4          = 0;
-        pr->gpu_runtime_100ns = gpu_runtime_100ns(pr->pid);
+            pr->pid           = (uint32_t)(ULONG_PTR)spi->UniqueProcessId;
+            pr->ppid          = (uint32_t)(ULONG_PTR)spi->InheritedFromUniqueProcessId;
+            pr->session_id    = spi->SessionId;
+            pr->thread_count  = spi->NumberOfThreads;
+            pr->handle_count  = spi->HandleCount;
+            pr->page_faults   = spi->PageFaultCount;
+            pr->command_line  = 0;   /* filled below */
+            pr->working_set   = (uint64_t)spi->WorkingSetSize;
+            pr->virtual_size  = (uint64_t)spi->VirtualSize;
+            pr->cpu_100ns     = (uint64_t)(spi->KernelTime.QuadPart + spi->UserTime.QuadPart);
+            pr->io_read_bytes = (uint64_t)spi->ReadTransferCount.QuadPart;
+            pr->io_write_bytes= (uint64_t)spi->WriteTransferCount.QuadPart;
+            pr->io_other_bytes= (uint64_t)spi->OtherTransferCount.QuadPart;
+            pr->create_time   = (uint64_t)spi->CreateTime.QuadPart;
+            pr->cpu_pct       = 0;
+            pr->suspended     = 0;
+            pr->base_priority = (uint8_t)(spi->BasePriority < 0 ? 0 : spi->BasePriority);
+            pr->_pad3         = 0;
 
-        if (spi->ImageName.Buffer && spi->ImageName.Length) {
-            size_t wlen = spi->ImageName.Length / sizeof(WCHAR);
-            pr->image_name = intern_str(spi->ImageName.Buffer, wlen);
-        } else {
-            pr->image_name = 0;
+            etw_counters_t ec;
+            etw_counters_for(pr->pid, &ec);
+            pr->etw_disk_total = ec.disk_read + ec.disk_write;
+            pr->etw_net_total  = ec.net_in    + ec.net_out;
+            pr->disk_bps       = 0;
+            pr->net_bps        = 0;
+            pr->image_path     = resolve_image_path(pr->pid, pr->create_time);
+            pr->command_line   = resolve_command_line(pr->pid, pr->create_time);
+            pr->gpu_pct        = 0;
+            pr->_pad4          = 0;
+            pr->gpu_runtime_100ns = gpu_runtime_100ns(pr->pid);
+
+            /* suspended: all threads in wait-state 5 (Suspended) */
+            {
+                int all_susp = (spi->NumberOfThreads > 0) ? 1 : 0;
+                for (ULONG ti = 0; ti < spi->NumberOfThreads && all_susp; ++ti) {
+                    if (spi->Threads[ti].ThreadState != 5 ||
+                        spi->Threads[ti].WaitReason  != 5)
+                        all_susp = 0;
+                }
+                pr->suspended = (uint8_t)all_susp;
+            }
+
+            if (spi->ImageName.Buffer && spi->ImageName.Length) {
+                size_t wlen = spi->ImageName.Length / sizeof(WCHAR);
+                pr->image_name = intern_str(spi->ImageName.Buffer, wlen);
+            } else {
+                pr->image_name = 0;
+            }
+            ++i;
         }
 
         if (spi->NextEntryOffset == 0) break;
@@ -360,6 +456,19 @@ static void take_sample(void)
     if (g_core_hist_count < SNAPSHOT_CORE_HIST_N) g_core_hist_count++;
     snap->n_disks  = (uint8_t)physdisk_sample(snap->disks,  PHYS_DISK_MAX, snap->timestamp);
     snap->n_ifaces = (uint8_t)netif_sample(snap->ifaces, NETIF_MAX, snap->timestamp);
+
+    /* cpu thermal */
+    thermal_sample();
+    snap->cpu_package_temp_c = thermal_cpu_temp();
+
+    /* gpu extended: memory, temperature, per-engine utilisation */
+    gpu_sample(snap->timestamp);
+    gpu_query_memory(&snap->gpu_mem);
+    snap->gpu_temp_c     = (int16_t)gpu_query_temp();
+    snap->n_gpu_engines  = (uint8_t)gpu_engine_count();
+    if (snap->n_gpu_engines > GPU_ENGINE_MAX) snap->n_gpu_engines = GPU_ENGINE_MAX;
+    for (int ge = 0; ge < snap->n_gpu_engines; ++ge)
+        snap->gpu_engine_pct[ge] = gpu_engine_pct(ge);
     g_prev_for_cpu = snap;
 
     /* roll cpu samples into per-pid history for sparklines */
@@ -369,6 +478,7 @@ static void take_sample(void)
     }
     history_age(snap->timestamp, 60000);
     path_cache_age(snap);
+    cmdline_cache_age(snap);
 
     g_published[g_next] = snap;
     g_pub_head = (int)g_next;
@@ -407,6 +517,7 @@ void snapshot_start(HWND notify, unsigned period_ms)
     g_page_size = si.dwPageSize;
 
     gpu_init();
+    thermal_init();
 
     g_scratch = arena_create(8 * 1024 * 1024);
     /* 512 KiB reserve per pool slot is plenty: a snapshot of ~400 processes
@@ -439,6 +550,7 @@ void snapshot_stop(void)
     g_pub_head = 0;
     for (int i = 0; i < POOL_N; ++i) g_published[i] = NULL;
     history_destroy();
+    thermal_destroy();
     gpu_destroy();
 }
 

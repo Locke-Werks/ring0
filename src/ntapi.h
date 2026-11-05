@@ -130,8 +130,13 @@ typedef NTSTATUS (NTAPI *fn_NtQueryInformationProcess)(
     ULONG  ProcessInformationLength,
     PULONG ReturnLength);
 
+typedef NTSTATUS (NTAPI *fn_NtSuspendProcess)(HANDLE ProcessHandle);
+typedef NTSTATUS (NTAPI *fn_NtResumeProcess)(HANDLE ProcessHandle);
+
 extern fn_NtQuerySystemInformation   nt_qsi;
 extern fn_NtQueryInformationProcess  nt_qip;
+extern fn_NtSuspendProcess           nt_suspend;
+extern fn_NtResumeProcess            nt_resume;
 
 void nt_init(void);
 

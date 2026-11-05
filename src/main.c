@@ -13,6 +13,7 @@
 #include "filter.h"
 #include "etw.h"
 #include "trust.h"
+#include "ntapi.h"
 
 int stack_capture(unsigned pid);
 
@@ -21,6 +22,14 @@ int stack_capture(unsigned pid);
 #define IDM_SEND_FORENSIC   1003
 #define IDM_COPY_PID        1004
 #define IDM_OPEN_LOCATION   1005
+#define IDM_SUSPEND_RESUME  1010
+#define IDM_PRI_REALTIME    1020
+#define IDM_PRI_HIGH        1021
+#define IDM_PRI_ABOVE       1022
+#define IDM_PRI_NORMAL      1023
+#define IDM_PRI_BELOW       1024
+#define IDM_PRI_LOW         1025
+#define IDM_AFF_SINGLE      1030
 
 /* dwmapi constants that only exist on recent Windows SDKs. Declared unconditionally
    so the build works on older SDKs; DWM silently rejects them on pre-Win11 22H2. */
@@ -181,6 +190,47 @@ static void open_process_location(unsigned pid)
     }
 }
 
+static void set_process_priority(unsigned pid, DWORD pri_class)
+{
+    if (pid == 0 || pid == 4) return;
+    HANDLE h = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
+    if (!h) return;
+    SetPriorityClass(h, pri_class);
+    CloseHandle(h);
+}
+
+static void toggle_suspend(unsigned pid)
+{
+    if (pid == 0 || pid == 4) return;
+    const snapshot_t *s = snapshot_current();
+    int is_suspended = 0;
+    if (s) {
+        for (uint32_t i = 0; i < s->n_processes; ++i) {
+            if (s->processes[i].pid == pid) {
+                is_suspended = s->processes[i].suspended;
+                break;
+            }
+        }
+    }
+    HANDLE h = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
+    if (!h) return;
+    if (is_suspended) {
+        if (nt_resume)  nt_resume(h);
+    } else {
+        if (nt_suspend) nt_suspend(h);
+    }
+    CloseHandle(h);
+}
+
+static void restrict_to_single_core(unsigned pid)
+{
+    if (pid == 0 || pid == 4) return;
+    HANDLE h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!h) return;
+    SetProcessAffinityMask(h, 1);
+    CloseHandle(h);
+}
+
 static void show_context_menu(HWND hwnd, int sx, int sy, unsigned pid)
 {
     if (pid == 0xFFFFFFFFu) return;
@@ -189,6 +239,18 @@ static void show_context_menu(HWND hwnd, int sx, int sy, unsigned pid)
     render_set_selected(pid);
     InvalidateRect(hwnd, NULL, FALSE);
 
+    /* look up suspended state */
+    int is_suspended = 0;
+    const snapshot_t *s = snapshot_current();
+    if (s) {
+        for (uint32_t i = 0; i < s->n_processes; ++i) {
+            if (s->processes[i].pid == pid) {
+                is_suspended = s->processes[i].suspended;
+                break;
+            }
+        }
+    }
+
     HMENU m = CreatePopupMenu();
     if (!m) return;
 
@@ -196,6 +258,38 @@ static void show_context_menu(HWND hwnd, int sx, int sy, unsigned pid)
     wsprintfW(lbl, L"end task  (pid %u)", pid);
     AppendMenuW(m, MF_STRING, IDM_END_TASK,      lbl);
     AppendMenuW(m, MF_STRING, IDM_END_TREE,      L"end process tree");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, IDM_SUSPEND_RESUME,
+                is_suspended ? L"resume process" : L"suspend process");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+
+    /* priority submenu with checkmark on current level */
+    HMENU pri = CreatePopupMenu();
+    if (pri) {
+        AppendMenuW(pri, MF_STRING, IDM_PRI_REALTIME, L"realtime");
+        AppendMenuW(pri, MF_STRING, IDM_PRI_HIGH,     L"high");
+        AppendMenuW(pri, MF_STRING, IDM_PRI_ABOVE,    L"above normal");
+        AppendMenuW(pri, MF_STRING, IDM_PRI_NORMAL,   L"normal");
+        AppendMenuW(pri, MF_STRING, IDM_PRI_BELOW,    L"below normal");
+        AppendMenuW(pri, MF_STRING, IDM_PRI_LOW,      L"low");
+
+        HANDLE qh = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        DWORD cur_pri = 0;
+        if (qh) { cur_pri = GetPriorityClass(qh); CloseHandle(qh); }
+        UINT check_id = 0;
+        switch (cur_pri) {
+        case REALTIME_PRIORITY_CLASS:     check_id = IDM_PRI_REALTIME; break;
+        case HIGH_PRIORITY_CLASS:         check_id = IDM_PRI_HIGH;     break;
+        case ABOVE_NORMAL_PRIORITY_CLASS: check_id = IDM_PRI_ABOVE;    break;
+        case NORMAL_PRIORITY_CLASS:       check_id = IDM_PRI_NORMAL;   break;
+        case BELOW_NORMAL_PRIORITY_CLASS: check_id = IDM_PRI_BELOW;    break;
+        case IDLE_PRIORITY_CLASS:         check_id = IDM_PRI_LOW;      break;
+        }
+        if (check_id) CheckMenuItem(pri, check_id, MF_BYCOMMAND | MF_CHECKED);
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)pri, L"set priority");
+    }
+    AppendMenuW(m, MF_STRING, IDM_AFF_SINGLE, L"restrict to single core");
+
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_SEND_FORENSIC, L"send to forensic tab");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -363,6 +457,30 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDM_OPEN_LOCATION:
             open_process_location(g_menu_pid);
+            return 0;
+        case IDM_SUSPEND_RESUME:
+            toggle_suspend(g_menu_pid);
+            return 0;
+        case IDM_PRI_REALTIME:
+            set_process_priority(g_menu_pid, REALTIME_PRIORITY_CLASS);
+            return 0;
+        case IDM_PRI_HIGH:
+            set_process_priority(g_menu_pid, HIGH_PRIORITY_CLASS);
+            return 0;
+        case IDM_PRI_ABOVE:
+            set_process_priority(g_menu_pid, ABOVE_NORMAL_PRIORITY_CLASS);
+            return 0;
+        case IDM_PRI_NORMAL:
+            set_process_priority(g_menu_pid, NORMAL_PRIORITY_CLASS);
+            return 0;
+        case IDM_PRI_BELOW:
+            set_process_priority(g_menu_pid, BELOW_NORMAL_PRIORITY_CLASS);
+            return 0;
+        case IDM_PRI_LOW:
+            set_process_priority(g_menu_pid, IDLE_PRIORITY_CLASS);
+            return 0;
+        case IDM_AFF_SINGLE:
+            restrict_to_single_core(g_menu_pid);
             return 0;
         }
         break;

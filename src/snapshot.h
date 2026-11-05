@@ -5,6 +5,7 @@
 #include "arena.h"
 #include "physdisk.h"
 #include "netif.h"
+#include "gpu.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,7 +19,7 @@ typedef struct {
     uint32_t thread_count;
     uint32_t handle_count;
     uint32_t page_faults;
-    uint32_t _pad;
+    uint32_t command_line;    /* intern handle, full command line; 0 if not resolved */
     uint64_t working_set;     /* bytes */
     uint64_t virtual_size;    /* bytes */
     uint64_t cpu_100ns;       /* kernel + user time, 100ns units */
@@ -27,7 +28,8 @@ typedef struct {
     uint64_t io_other_bytes;
     uint64_t create_time;     /* 100ns since 1601 */
     uint16_t cpu_pct;         /* fixed point, value/10 = percent (235 = 23.5%) */
-    uint16_t _pad2;
+    uint8_t  suspended;      /* 1 if all threads are in suspended wait */
+    uint8_t  base_priority;
     uint32_t _pad3;
     uint64_t etw_disk_total;  /* cumulative bytes, read + write, from ETW DiskIo */
     uint64_t etw_net_total;   /* cumulative bytes, in + out, from ETW TcpIp */
@@ -72,6 +74,14 @@ typedef struct {
     uint8_t    _pad3[6];
     phys_disk_t disks[PHYS_DISK_MAX];
     net_if_t   ifaces[NETIF_MAX];
+    /* cpu thermal */
+    float      cpu_package_temp_c;    /* Celsius, -1 if unavailable */
+    /* gpu extended info */
+    int16_t    gpu_temp_c;            /* Celsius, -1 if unavailable */
+    uint8_t    n_gpu_engines;
+    uint8_t    _pad_gpu;
+    gpu_mem_info_t gpu_mem;
+    uint16_t   gpu_engine_pct[GPU_ENGINE_MAX];
     process_t *processes;     /* flat array in the same arena */
 } snapshot_t;
 

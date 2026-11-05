@@ -101,6 +101,10 @@ void render_set_stack_frames(const stack_frame_t *frames, int n, unsigned pid);
    forensic). 0xFFFFFFFFu if nothing. Populated during render_frame. */
 unsigned render_hit_proc_row(int x, int y);
 
+/* Expose the D2D render target so the icon module can create bitmaps
+   on the render thread. Returns an ID2D1HwndRenderTarget*. */
+void *render_get_target_raw(void);
+
 #ifdef __cplusplus
 }
 #endif

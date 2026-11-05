@@ -16,6 +16,8 @@ static inline WORD swap16(WORD v) { return (WORD)((v >> 8) | (v << 8)); }
 #include "history.h"
 #include "filter.h"
 #include "trust.h"
+#include "gpu.h"
+#include "icon.h"
 
 static ID2D1Factory          *g_d2d        = nullptr;
 static IDWriteFactory        *g_dw         = nullptr;
@@ -57,6 +59,7 @@ static float                  g_scrubber_y;
 static int                    g_diff_back = -1;     /* baseline back-index, -1 inactive */
 static int                    g_tree_mode;
 static int                    g_view = VIEW_PROCESSES;
+static int                    g_total_count;           /* processes in latest snapshot */
 static int                    g_hover_x = -1, g_hover_y = -1;
 static unsigned               g_hover_pid = 0xFFFFFFFFu;
 static float                  g_view_tab_x[VIEW_COUNT], g_view_tab_y, g_view_tab_w, g_view_tab_h;
@@ -101,6 +104,57 @@ static float g_disk_r_ema[PHYS_DISK_MAX];
 static float g_disk_w_ema[PHYS_DISK_MAX];
 static float g_net_in_ema[NETIF_MAX];
 static float g_net_out_ema[NETIF_MAX];
+
+/* Per-core CPU EMA — smooths the user/kern bar fill so the meters tween
+   at 60 fps instead of jumping every 250 ms snapshot. */
+static float g_core_user_ema[64];
+static float g_core_kern_ema[64];
+
+static inline float ema_lerp(float prev, float cur);   /* fwd decl */
+
+/* Per-process EMA — smooths disk/net/gpu values so the top-N lists don't
+   blink when a process bursts for one 250 ms window then goes idle.
+   Open-addressed hash keyed by (pid, create_time). */
+struct proc_smooth {
+    unsigned pid;
+    uint64_t create_time;
+    float    disk_bps;
+    float    net_bps;
+    float    gpu_pct;
+};
+#define PROC_SMOOTH_N 2048u
+static proc_smooth g_psmooth[PROC_SMOOTH_N];
+
+static proc_smooth *psmooth_get(unsigned pid, uint64_t ctime)
+{
+    unsigned h = (pid * 2654435761u) & (PROC_SMOOTH_N - 1);
+    proc_smooth *empty = nullptr;
+    for (unsigned i = 0; i < 32; ++i) {
+        proc_smooth *s = &g_psmooth[(h + i) & (PROC_SMOOTH_N - 1)];
+        if (s->pid == pid && s->create_time == ctime) return s;
+        if (s->pid == 0 && !empty) empty = s;
+        if (s->pid == 0) break;
+    }
+    if (empty) {
+        empty->pid = pid;
+        empty->create_time = ctime;
+        empty->disk_bps = empty->net_bps = empty->gpu_pct = 0;
+    }
+    return empty;
+}
+
+static void psmooth_update(const snapshot_t *snap)
+{
+    if (!snap) return;
+    for (uint32_t i = 0; i < snap->n_processes; ++i) {
+        const process_t *p = &snap->processes[i];
+        proc_smooth *s = psmooth_get(p->pid, p->create_time);
+        if (!s) continue;
+        s->disk_bps = ema_lerp(s->disk_bps, (float)p->disk_bps);
+        s->net_bps  = ema_lerp(s->net_bps,  (float)p->net_bps);
+        s->gpu_pct  = ema_lerp(s->gpu_pct,  (float)p->gpu_pct);
+    }
+}
 
 /* Frame timing — populated at the top of render_frame so every smoother in
    the file can use a consistent dt and inter-snapshot phase. */
@@ -330,20 +384,28 @@ static const float SCRUBBER_H_BASE = 56.0f;
 
 /* Walk the snapshot ring (newest..oldest) and gather two parallel series.
    `pick(s, &a, &b)` extracts the two values from a snapshot. The output
-   buffers are written oldest-first, with `*out_n` samples actually filled.
-   Caller passes max capacity in `cap`. */
+   buffers are always filled to `cap` — actual data is right-aligned and
+   the left is zero-padded so the graph starts at full width with a fixed
+   dx from the very first sample (no compression/jump as points accumulate). */
 typedef void (*series_fn)(const snapshot_t *, uint64_t *, uint64_t *);
 static void gather_series(uint64_t *a, uint64_t *b, int *out_n, int cap, series_fn pick)
 {
-    int n = snapshot_count();
-    if (n > cap) n = cap;
-    *out_n = n;
-    for (int i = 0; i < n; ++i) {
-        const snapshot_t *s = snapshot_at((n - 1) - i);
+    int avail = snapshot_count();
+    if (avail == 0) { *out_n = 0; return; }
+    if (avail > cap) avail = cap;
+    *out_n = cap;
+
+    /* zero-fill so early frames show a flat baseline on the left */
+    for (int i = 0; i < cap; ++i) { a[i] = 0; b[i] = 0; }
+
+    /* actual data lands at the right edge */
+    int off = cap - avail;
+    for (int i = 0; i < avail; ++i) {
+        const snapshot_t *s = snapshot_at((avail - 1) - i);
         uint64_t va = 0, vb = 0;
         if (s) pick(s, &va, &vb);
-        a[i] = va;
-        b[i] = vb;
+        a[off + i] = va;
+        b[off + i] = vb;
     }
 }
 
@@ -371,6 +433,24 @@ static void pick_gpu(const snapshot_t *s, uint64_t *g, uint64_t *unused)
     *unused = 0;
 }
 
+/* Per-engine GPU series — manual gather loop (same pattern as per-core CPU
+   sparklines) since gather_series takes a plain function pointer that can't
+   be parameterised by engine index. */
+static void gather_engine_series(uint64_t *out, int *out_n, int cap, int engine_idx)
+{
+    int avail = snapshot_count();
+    if (avail == 0) { *out_n = 0; return; }
+    if (avail > cap) avail = cap;
+    *out_n = cap;
+    for (int i = 0; i < cap; ++i) out[i] = 0;
+    int off = cap - avail;
+    for (int i = 0; i < avail; ++i) {
+        const snapshot_t *s = snapshot_at((avail - 1) - i);
+        out[off + i] = (s && engine_idx < s->n_gpu_engines)
+                     ? s->gpu_engine_pct[engine_idx] : 0;
+    }
+}
+
 static void pick_cpu(const snapshot_t *s, uint64_t *c, uint64_t *unused)
 {
     *c = s->agg_cpu_pct;     /* fixed point /10 */
@@ -388,7 +468,7 @@ static void pick_mem(const snapshot_t *s, uint64_t *phys, uint64_t *commit)
         : 0;
 }
 
-/* Format a bytes/sec value into a compact label. */
+/* Format a bytes/sec value into a compact label (binary units, for disk). */
 static int fmt_bps(wchar_t *buf, uint64_t bps)
 {
     if (bps >= (uint64_t)1024 * 1024 * 1024)
@@ -400,6 +480,23 @@ static int fmt_bps(wchar_t *buf, uint64_t bps)
     if (bps >= 1024)
         return wsprintfW(buf, L"%u KiB/s", (unsigned)(bps / 1024));
     return wsprintfW(buf, L"%u B/s", (unsigned)bps);
+}
+
+/* Format a bytes/sec value into bits/sec with decimal SI units (for network). */
+static int fmt_net(wchar_t *buf, uint64_t Bps)
+{
+    uint64_t bits = Bps * 8;
+    if (bits >= 1000000000ull)
+        return wsprintfW(buf, L"%u.%u Gbps",
+            (unsigned)(bits / 1000000000ull),
+            (unsigned)((bits / 100000000ull) % 10));
+    if (bits >= 1000000ull)
+        return wsprintfW(buf, L"%u.%u Mbps",
+            (unsigned)(bits / 1000000ull),
+            (unsigned)((bits / 100000ull) % 10));
+    if (bits >= 1000ull)
+        return wsprintfW(buf, L"%u Kbps", (unsigned)(bits / 1000ull));
+    return wsprintfW(buf, L"%u bps", (unsigned)bits);
 }
 
 /* Single-series filled-area path with a vertical gradient brush fill so the
@@ -462,22 +559,13 @@ static void stroke_series(const uint64_t *s, int n, uint64_t mx,
         g_rt->DrawLine(D2D1::Point2F(x_last, y_last),
                        D2D1::Point2F(gx + gw, y_last), g_brush, thickness);
 
-    /* dot markers on the last few visible samples for a polished feel */
-    if (draw_dots && n >= 2) {
-        float r = 2.5f * g_scale;
-        int start = n > 20 ? n - 20 : 0;
-        for (int i = start; i < n; ++i) {
-            float cx = gx + (float)i * dx + xshift;
-            float cy = gy + gh - ((float)s[i] / (float)mx) * gh;
-            if (cx >= gx && cx <= gx + gw)
-                g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), g_brush);
-        }
-    }
+    (void)draw_dots;
 }
 
 /* Two-series area+line graph. Series A is drawn on top of B with lighter fill;
    both share the same vertical scale (max of both). Time axis runs left-to-right
    with the most recent sample on the right. Scrolls smoothly via g_anim_phase. */
+/* format: 0 = percentage, 1 = disk bytes/s, 2 = network bits/s */
 static void draw_dual_series(const theme_t *th, const view_accent *va,
                              float gx, float gy, float gw, float gh,
                              const uint64_t *sa, const uint64_t *sb, int n,
@@ -504,11 +592,15 @@ static void draw_dual_series(const theme_t *th, const view_accent *va,
 
     uint64_t mx = 1;
     if (n >= 2) {
-        for (int i = 0; i < n; ++i) {
-            if (sa && sa[i] > mx) mx = sa[i];
-            if (sb && sb[i] > mx) mx = sb[i];
+        if (!format_as_bps) {
+            mx = 1000;   /* percentage graphs pin at 100% */
+        } else {
+            for (int i = 0; i < n; ++i) {
+                if (sa && sa[i] > mx) mx = sa[i];
+                if (sb && sb[i] > mx) mx = sb[i];
+            }
+            if (mx < 8) mx = 8;
         }
-        if (mx < 8) mx = 8;
 
         float dx = gw / (float)(n - 1);
         float xshift = -g_anim_phase * dx;
@@ -539,13 +631,19 @@ static void draw_dual_series(const theme_t *th, const view_accent *va,
     g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     float lx = gx + 12.0f * g_scale;
     float ly = gy + 6.0f  * g_scale;
+    /* helper: pick the right unit formatter */
+    auto fmt_val = [&](wchar_t *v, uint64_t val) -> int {
+        if (format_as_bps == 2) return fmt_net(v, val);
+        return fmt_bps(v, val);
+    };
+
     /* swatch A */
     if (label_a) {
         g_brush->SetColor(va->line);
         g_rt->FillRectangle(D2D1::RectF(lx, ly + 6.0f, lx + 10.0f, ly + 14.0f), g_brush);
         g_brush->SetColor(to_d2d(th->foreground, 0.95f));
         if (format_as_bps) {
-            wchar_t v[24]; int vl = fmt_bps(v, cur_a); v[vl] = 0;
+            wchar_t v[24]; int vl = fmt_val(v, cur_a); v[vl] = 0;
             len = wsprintfW(buf, L"%s  %s", label_a, v);
         } else {
             len = wsprintfW(buf, L"%s  %u.%u%%", label_a,
@@ -560,7 +658,7 @@ static void draw_dual_series(const theme_t *th, const view_accent *va,
         g_rt->FillRectangle(D2D1::RectF(lx, ly + 6.0f, lx + 10.0f, ly + 14.0f), g_brush);
         g_brush->SetColor(to_d2d(th->foreground, 0.85f));
         if (format_as_bps) {
-            wchar_t v[24]; int vl = fmt_bps(v, cur_b); v[vl] = 0;
+            wchar_t v[24]; int vl = fmt_val(v, cur_b); v[vl] = 0;
             len = wsprintfW(buf, L"%s  %s", label_b, v);
         } else {
             len = wsprintfW(buf, L"%s  %u.%u%%", label_b,
@@ -574,10 +672,10 @@ static void draw_dual_series(const theme_t *th, const view_accent *va,
     g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
     g_brush->SetColor(to_d2d(th->foreground, 0.55f));
     if (format_as_bps) {
-        wchar_t v[24]; int vl = fmt_bps(v, mx); v[vl] = 0;
+        wchar_t v[24]; int vl = fmt_val(v, mx); v[vl] = 0;
         len = wsprintfW(buf, L"max %s", v);
     } else {
-        len = wsprintfW(buf, L"max %u%%", (unsigned)(mx / 10));
+        len = wsprintfW(buf, L"100%%");
     }
     g_rt->DrawText(buf, len, g_fmt_chrome,
         D2D1::RectF(gx, gy + 6.0f, gx + gw - 12.0f, gy + 22.0f * g_scale), g_brush);
@@ -597,33 +695,46 @@ static void draw_scrubber(const theme_t *th, float x, float y, float w, float h)
 
     float chart_y = y + 6.0f;
     float chart_h = h - 12.0f;
-    /* always reserve a 240-sample width so older samples sit on the left
-       and the playhead lives at the right edge */
     float col_w = w / 240.0f;
 
-    /* find max for normalization across the visible window */
-    uint32_t max_cpu = 1;       /* avoid div-by-zero; min 0.1% */
-    for (int i = 0; i < n; ++i) {
-        const snapshot_t *s = snapshot_at(i);
-        if (s && s->agg_cpu_pct > max_cpu) max_cpu = s->agg_cpu_pct;
+    /* extract the metric matching the active view so the scrubber tells a
+       contextually relevant story — cpu when on cpu, disk when on disk, etc. */
+    float vals[240];
+    float max_val = 0.001f;
+    int is_pct = 0;
+    for (int i = 0; i < n && i < 240; ++i) {
+        const snapshot_t *s = snapshot_at((n - 1) - i);
+        float v = 0;
+        if (s) {
+            switch (g_view) {
+            case VIEW_MEMORY:
+                v = (float)s->mem.mem_load_pct * 10.0f; is_pct = 1; break;
+            case VIEW_GPU:
+                v = (float)s->agg_gpu_pct; is_pct = 1; break;
+            case VIEW_DISK:
+                v = (float)s->agg_disk_bps; break;
+            case VIEW_NETWORK:
+                v = (float)s->agg_net_bps; break;
+            default:
+                v = (float)s->agg_cpu_pct; is_pct = 1; break;
+            }
+        }
+        vals[i] = v;
+        if (v > max_val) max_val = v;
     }
-    if (max_cpu < 1000) max_cpu = 1000;   /* ceiling at 100% so quiet systems
-                                             don't look maxed out */
+    if (is_pct) max_val = 1000.0f;
 
-    /* tween shift — keeps the scrubber moving in lockstep with the per-view
-       graphs so the whole ui scrolls as one */
     float xshift = -g_anim_phase * col_w;
-    g_brush->SetColor(to_d2d(th->accent, 0.45f));
-    for (int i = 0; i < n; ++i) {
-        const snapshot_t *s = snapshot_at((n - 1) - i);   /* oldest first */
-        if (!s) continue;
-        float pct = (float)s->agg_cpu_pct / (float)max_cpu;
+    D2D1_COLOR_F bar_c = cur_va()->bar;
+    bar_c.a = 0.50f;
+    g_brush->SetColor(bar_c);
+    for (int i = 0; i < n && i < 240; ++i) {
+        float pct = vals[i] / max_val;
         if (pct > 1.0f) pct = 1.0f;
         float bx = x + (float)(240 - n + i) * col_w + xshift;
         float bh = pct * chart_h;
-        D2D1_RECT_F r = D2D1::RectF(bx, chart_y + chart_h - bh,
-                                    bx + col_w, chart_y + chart_h);
-        g_rt->FillRectangle(r, g_brush);
+        g_rt->FillRectangle(D2D1::RectF(bx, chart_y + chart_h - bh,
+                                        bx + col_w, chart_y + chart_h), g_brush);
     }
 }
 
@@ -811,7 +922,7 @@ static const Col g_cols[COL_COUNT] = {
     { L"GPU%",   50,  true  },
     { L"MEM",    70,  true  },
     { L"DISK/s", 65,  true  },
-    { L"NET/s",  65,  true  },
+    { L"NET",    65,  true  },
     { L"THR",    45,  true  },
     { L"HND",    50,  true  },
     { L"TRUST",  36,  false },
@@ -910,9 +1021,12 @@ static void recreate_text_formats(void)
         DWRITE_FONT_WEIGHT_BOLD, 15.0f * g_scale);
 }
 
+extern "C" void *render_get_target_raw(void) { return g_rt; }
+
 extern "C" void render_init(HWND hwnd)
 {
     g_hwnd = hwnd;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
                       __uuidof(ID2D1Factory),
                       reinterpret_cast<void **>(&g_d2d));
@@ -927,6 +1041,7 @@ extern "C" void render_init(HWND hwnd)
     recreate_text_formats();
 
     create_target();
+    icon_start();
 }
 
 extern "C" void render_set_transparent(BOOL t) { g_transparent = t; }
@@ -1310,6 +1425,8 @@ extern "C" void render_frame(const snapshot_t *snap)
     g_hover_pid = (g_hover_x >= 0 && g_hover_y >= 0)
         ? render_hit_proc_row(g_hover_x, g_hover_y) : 0xFFFFFFFFu;
     g_row_hits_n = 0;
+    g_total_count = snap ? (int)snap->n_processes : 0;
+    psmooth_update(snap);
 
     float grid_w = g_w_dips;
     if (g_inspector_open) grid_w -= INSPECTOR_W;
@@ -1368,6 +1485,18 @@ extern "C" void render_frame(const snapshot_t *snap)
                 g_rt->FillRoundedRectangle(rrr, g_brush);
             }
             tx += g_view_tab_w;
+        }
+
+        /* process count right-aligned in the tab bar */
+        if (g_total_count > 0) {
+            wchar_t cnt[64];
+            int cn = wsprintfW(cnt, L"%d processes", g_total_count);
+            g_brush->SetColor(to_d2d(th->foreground, 0.35f));
+            g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            g_rt->DrawText(cnt, (UINT32)cn, g_fmt_chrome,
+                D2D1::RectF(0, g_view_tab_y + 8.0f * g_scale,
+                            g_w_dips - 14.0f * g_scale,
+                            g_view_tab_y + g_view_tab_h), g_brush);
         }
     }
 
@@ -1507,7 +1636,171 @@ extern "C" void render_frame(const snapshot_t *snap)
                     D2D1::RectF(left_x + 6.0f, yy, g_w_dips - left_x, yy + 18.0f), g_brush);
                 yy += 20.0f;
             }
-        } else if ((g_view == VIEW_DISK || g_view == VIEW_NETWORK || g_view == VIEW_GPU) && snap) {
+        } else if (g_view == VIEW_GPU && snap) {
+            /* ── dedicated GPU view ─────────────────────────────────────── */
+            const float left_x = 24.0f * g_scale;
+            float yy = top + 12.0f * g_scale;
+            wchar_t buf2[160];
+            int n2;
+
+            /* headline — adapter name + temperature */
+            const wchar_t *aname = gpu_adapter_name();
+            g_brush->SetColor(cur_va()->line);
+            g_fmt_heading->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            if (aname) {
+                if (snap->gpu_temp_c >= 0)
+                    n2 = wsprintfW(buf2, L"%s   %d\u00B0C", aname, snap->gpu_temp_c);
+                else
+                    n2 = wsprintfW(buf2, L"%s", aname);
+            } else {
+                n2 = wsprintfW(buf2, L"gpu activity");
+            }
+            g_rt->DrawText(buf2, n2, g_fmt_heading,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 26.0f * g_scale), g_brush);
+
+            /* aggregate value beside headline */
+            g_brush->SetColor(to_d2d(th->foreground, 0.65f));
+            g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            n2 = wsprintfW(buf2, L"%u.%u%% utilisation",
+                (unsigned)(snap->agg_gpu_pct / 10),
+                (unsigned)(snap->agg_gpu_pct % 10));
+            g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                D2D1::RectF(left_x, yy + 2.0f * g_scale,
+                            g_w_dips - left_x, yy + 26.0f * g_scale), g_brush);
+            yy += 32.0f * g_scale;
+
+            /* aggregate utilisation graph */
+            uint64_t sa[150], sb[150];
+            int hn = 0;
+            gather_series(sa, sb, &hn, 150, pick_gpu);
+            float gw = g_w_dips - left_x * 2.0f;
+            float gh = 100.0f * g_scale;
+            draw_dual_series(th, cur_va(), left_x, yy, gw, gh,
+                             sa, NULL, hn, snap->agg_gpu_pct, 0,
+                             L"total", NULL, 0);
+            yy += gh + 16.0f * g_scale;
+
+            /* gpu memory bars */
+            const gpu_mem_info_t *gm = &snap->gpu_mem;
+            if (gm->dedicated_total > 0) {
+                float bar_w = gw;
+                /* dedicated */
+                g_brush->SetColor(cur_va()->line);
+                g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                n2 = wsprintfW(buf2, L"dedicated memory   %I64u / %I64u MB",
+                    gm->dedicated_used / (1024 * 1024),
+                    gm->dedicated_total / (1024 * 1024));
+                g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                    D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 20.0f * g_scale), g_brush);
+                yy += 22.0f * g_scale;
+                D2D1_ROUNDED_RECT mbg;
+                mbg.rect = D2D1::RectF(left_x, yy, left_x + bar_w, yy + 14.0f * g_scale);
+                mbg.radiusX = 4.0f * g_scale; mbg.radiusY = 4.0f * g_scale;
+                g_brush->SetColor(to_d2d(th->subtle, 0.30f));
+                g_rt->FillRoundedRectangle(mbg, g_brush);
+                float frac = (float)gm->dedicated_used / (float)gm->dedicated_total;
+                if (frac > 1.0f) frac = 1.0f;
+                mbg.rect.right = left_x + bar_w * frac;
+                g_brush->SetColor(cur_va()->bar);
+                g_rt->FillRoundedRectangle(mbg, g_brush);
+                yy += 20.0f * g_scale;
+
+                /* shared */
+                if (gm->shared_total > 0) {
+                    g_brush->SetColor(cur_va()->line2);
+                    n2 = wsprintfW(buf2, L"shared memory      %I64u / %I64u MB",
+                        gm->shared_used / (1024 * 1024),
+                        gm->shared_total / (1024 * 1024));
+                    g_rt->DrawText(buf2, n2, g_fmt_chrome,
+                        D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 20.0f * g_scale), g_brush);
+                    yy += 22.0f * g_scale;
+                    D2D1_ROUNDED_RECT sbg;
+                    sbg.rect = D2D1::RectF(left_x, yy, left_x + bar_w, yy + 10.0f * g_scale);
+                    sbg.radiusX = 3.0f * g_scale; sbg.radiusY = 3.0f * g_scale;
+                    g_brush->SetColor(to_d2d(th->subtle, 0.30f));
+                    g_rt->FillRoundedRectangle(sbg, g_brush);
+                    frac = (float)gm->shared_used / (float)gm->shared_total;
+                    if (frac > 1.0f) frac = 1.0f;
+                    sbg.rect.right = left_x + bar_w * frac;
+                    D2D1_COLOR_F sc = cur_va()->line2; sc.a = 0.55f;
+                    g_brush->SetColor(sc);
+                    g_rt->FillRoundedRectangle(sbg, g_brush);
+                    yy += 18.0f * g_scale;
+                }
+                yy += 8.0f * g_scale;
+            }
+
+            /* per-engine utilisation — mini time-series graphs */
+            if (snap->n_gpu_engines > 0) {
+                float gh_mini = 60.0f * g_scale;
+                float gap     = 8.0f  * g_scale;
+                for (int ei = 0; ei < snap->n_gpu_engines; ++ei) {
+                    if (yy + gh_mini > g_h_dips - SCRUBBER_H) break;
+                    const wchar_t *ename = gpu_engine_name(ei);
+                    uint64_t esa[60];
+                    int ehn = 0;
+                    gather_engine_series(esa, &ehn, 60, ei);
+                    draw_dual_series(th, cur_va(), left_x, yy, gw, gh_mini,
+                                     esa, NULL, ehn,
+                                     (uint64_t)snap->gpu_engine_pct[ei], 0,
+                                     ename ? ename : L"?", NULL, 0);
+                    yy += gh_mini + gap;
+                }
+            }
+
+            /* top gpu consumers — sorted by smoothed gpu_pct */
+            uint32_t idx[1024];
+            float    gsval[1024];
+            uint32_t mn = snap->n_processes;
+            if (mn > 1024) mn = 1024;
+            for (uint32_t i = 0; i < mn; ++i) {
+                idx[i] = i;
+                proc_smooth *s = psmooth_get(snap->processes[i].pid,
+                                             snap->processes[i].create_time);
+                gsval[i] = s ? s->gpu_pct : 0;
+            }
+            for (uint32_t i = 1; i < mn; ++i) {
+                uint32_t cur = idx[i]; uint32_t j = i;
+                while (j > 0 && gsval[idx[j-1]] < gsval[cur]) {
+                    idx[j] = idx[j-1]; --j;
+                }
+                idx[j] = cur;
+            }
+            float max_gv = mn > 0 ? gsval[idx[0]] : 1.0f;
+            if (max_gv < 1.0f) max_gv = 1.0f;
+
+            g_brush->SetColor(to_d2d(th->foreground, 0.65f));
+            g_rt->DrawText(L"top gpu", 7, g_fmt_heading,
+                D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
+            yy += 28.0f * g_scale;
+            g_brush->SetColor(to_d2d(th->subtle, 0.5f));
+            g_rt->FillRectangle(D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 1.0f), g_brush);
+            yy += 8.0f * g_scale;
+
+            float row_h_v = 22.0f * g_scale;
+            for (uint32_t i = 0; i < 30 && i < mn; ++i) {
+                if (yy + row_h_v > g_h_dips - SCRUBBER_H) break;
+                const process_t *pp = &snap->processes[idx[i]];
+                float sv = gsval[idx[i]];
+                if (sv < 0.5f) break;
+                const wchar_t *name = intern_get(pp->image_name);
+                if (!name) name = L"<unknown>";
+                float row_w = gw * (sv / max_gv);
+                record_row(left_x, yy, g_w_dips - left_x, yy + row_h_v, pp->pid);
+                D2D1_COLOR_F tbc = cur_va()->bar; tbc.a = 0.30f;
+                g_brush->SetColor(tbc);
+                g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
+                    yy + row_h_v - 2.0f * g_scale), g_brush);
+                g_brush->SetColor(to_d2d(th->foreground, 0.95f));
+                unsigned gpct = (unsigned)(sv + 0.5f);
+                n2 = wsprintfW(buf2, L"%6u  %u.%u%%  %s",
+                    pp->pid, gpct / 10, gpct % 10, name);
+                g_rt->DrawText(buf2, n2, g_fmt_data,
+                    D2D1::RectF(left_x + 6.0f * g_scale, yy,
+                                g_w_dips - left_x, yy + row_h_v), g_brush);
+                yy += row_h_v;
+            }
+        } else if ((g_view == VIEW_DISK || g_view == VIEW_NETWORK) && snap) {
             const float left_x = 24.0f * g_scale;
             float yy = top + 12.0f * g_scale;
             wchar_t buf2[160];
@@ -1516,11 +1809,10 @@ extern "C" void render_frame(const snapshot_t *snap)
             const wchar_t *headline = L"";
             int      mode_disk = (g_view == VIEW_DISK);
             int      mode_net  = (g_view == VIEW_NETWORK);
-            int      mode_gpu  = (g_view == VIEW_GPU);
 
             uint64_t cur_a = 0, cur_b = 0;
             const wchar_t *label_a = L"", *label_b = L"";
-            int format_as_bps = 1;
+            int format_as_bps = mode_net ? 2 : 1;  /* 2 = bits/s for network */
 
             if (mode_disk) {
                 headline = L"system disk i/o";
@@ -1538,12 +1830,6 @@ extern "C" void render_frame(const snapshot_t *snap)
                 }
                 label_a = L"in"; label_b = L"out";
             }
-            if (mode_gpu) {
-                headline = L"gpu activity";
-                cur_a = snap->agg_gpu_pct;
-                label_a = L"total"; label_b = NULL;
-                format_as_bps = 0;
-            }
 
             /* headline with view-colored accent text */
             g_brush->SetColor(cur_va()->line);
@@ -1555,11 +1841,10 @@ extern "C" void render_frame(const snapshot_t *snap)
             g_brush->SetColor(to_d2d(th->foreground, 0.65f));
             g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             float val_x = left_x + 200.0f * g_scale;
-            if (mode_gpu) {
-                n2 = wsprintfW(buf2, L"%u.%u%% aggregate",
-                    (unsigned)(cur_a / 10), (unsigned)(cur_a % 10));
-            } else {
-                wchar_t v[24]; int vl = fmt_bps(v, cur_a + cur_b); v[vl] = 0;
+            {
+                wchar_t v[24];
+                int vl = mode_net ? fmt_net(v, cur_a + cur_b) : fmt_bps(v, cur_a + cur_b);
+                v[vl] = 0;
                 n2 = wsprintfW(buf2, L"%s aggregate", v);
             }
             g_rt->DrawText(buf2, n2, g_fmt_chrome,
@@ -1570,7 +1855,7 @@ extern "C" void render_frame(const snapshot_t *snap)
             /* time-series graph — last ~150 samples (~37s @ 250ms cadence) */
             uint64_t sa[150], sb[150];
             int hn = 0;
-            series_fn pick = mode_disk ? pick_disk : (mode_net ? pick_net : pick_gpu);
+            series_fn pick = mode_disk ? pick_disk : pick_net;
             gather_series(sa, sb, &hn, 150, pick);
 
             float gw = g_w_dips - left_x * 2.0f;
@@ -1581,7 +1866,7 @@ extern "C" void render_frame(const snapshot_t *snap)
             if (remaining < gh) gh = remaining;
             if (gh < 80.0f * g_scale) gh = 80.0f * g_scale;
             draw_dual_series(th, cur_va(), left_x, yy, gw, gh,
-                             sa, mode_gpu ? NULL : sb, hn,
+                             sa, sb, hn,
                              cur_a, cur_b, label_a, label_b, format_as_bps);
             yy += gh + 16.0f * g_scale;
 
@@ -1622,11 +1907,14 @@ extern "C" void render_frame(const snapshot_t *snap)
                     g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                         yy + row_h_n - 3.0f * g_scale), g_brush);
                     g_brush->SetColor(to_d2d(th->foreground, ifc->up ? 0.95f : 0.55f));
+                    /* convert bytes/s → Mbps for display */
+                    float in_mbps  = g_net_in_ema[ni]  * 8.0f / 1000000.0f;
+                    float out_mbps = g_net_out_ema[ni] * 8.0f / 1000000.0f;
                     n2 = wsprintfW(buf2,
-                        L"%-40s  in %5u KiB/s   out %5u KiB/s   %s  %u Mb",
+                        L"%-40s  in %u.%u Mbps   out %u.%u Mbps   %s  %u Mbps",
                         ifc->name,
-                        (unsigned)(g_net_in_ema[ni]  / 1024.0f),
-                        (unsigned)(g_net_out_ema[ni] / 1024.0f),
+                        (unsigned)in_mbps,  (unsigned)(in_mbps  * 10) % 10,
+                        (unsigned)out_mbps, (unsigned)(out_mbps * 10) % 10,
                         ifc->up ? L"up" : L"--",
                         (unsigned)(ifc->link_speed / 1000000));
                     g_rt->DrawText(buf2, n2, g_fmt_data,
@@ -1683,30 +1971,32 @@ extern "C" void render_frame(const snapshot_t *snap)
                 yy += 12.0f * g_scale;
             }
 
-            /* sort top consumers */
+            /* sort top consumers by EMA-smoothed values so the list doesn't
+               blink when a process bursts for one 250 ms window */
             uint32_t idx[1024];
+            float    sval[1024];
             uint32_t mn = snap->n_processes;
             if (mn > 1024) mn = 1024;
-            for (uint32_t i = 0; i < mn; ++i) idx[i] = i;
-            #define VAL(p) (mode_disk ? (uint64_t)(p)->disk_bps : \
-                            mode_net  ? (uint64_t)(p)->net_bps  : \
-                                        (uint64_t)(p)->gpu_pct)
+            for (uint32_t i = 0; i < mn; ++i) {
+                idx[i] = i;
+                proc_smooth *s = psmooth_get(snap->processes[i].pid,
+                                             snap->processes[i].create_time);
+                sval[i] = s ? (mode_disk ? s->disk_bps : s->net_bps) : 0;
+            }
             for (uint32_t i = 1; i < mn; ++i) {
                 uint32_t cur = idx[i];
                 uint32_t j = i;
-                while (j > 0 && VAL(&snap->processes[idx[j-1]]) < VAL(&snap->processes[cur])) {
+                while (j > 0 && sval[idx[j-1]] < sval[cur]) {
                     idx[j] = idx[j-1]; --j;
                 }
                 idx[j] = cur;
             }
 
-            uint64_t max_v = mn > 0 ? VAL(&snap->processes[idx[0]]) : 1;
-            if (max_v == 0) max_v = 1;
+            float max_sv = mn > 0 ? sval[idx[0]] : 1.0f;
+            if (max_sv < 1.0f) max_sv = 1.0f;
 
             const wchar_t *col_label =
-                mode_disk ? L"top disk i/o" :
-                mode_net  ? L"top network i/o" :
-                            L"top gpu";
+                mode_disk ? L"top disk i/o" : L"top network i/o";
             g_brush->SetColor(to_d2d(th->foreground, 0.65f));
             g_rt->DrawText(col_label, lstrlenW(col_label), g_fmt_heading,
                 D2D1::RectF(left_x, yy, g_w_dips - left_x, yy + 22.0f * g_scale), g_brush);
@@ -1720,30 +2010,29 @@ extern "C" void render_frame(const snapshot_t *snap)
             for (uint32_t i = 0; i < 30 && i < mn; ++i) {
                 if (yy + row_h_v > g_h_dips - SCRUBBER_H) break;
                 const process_t *pp = &snap->processes[idx[i]];
-                uint64_t v = VAL(pp);
-                if (v == 0) break;          /* sorted desc; rest are zero */
+                float sv = sval[idx[i]];
+                if (sv < 0.5f) break;
                 const wchar_t *name = intern_get(pp->image_name);
                 if (!name) name = L"<unknown>";
-                float row_w = bar_w * ((float)v / (float)max_v);
+                float row_w = bar_w * (sv / max_sv);
                 record_row(left_x, yy, g_w_dips - left_x, yy + row_h_v, pp->pid);
                 D2D1_COLOR_F tbc = cur_va()->bar; tbc.a = 0.30f;
                 g_brush->SetColor(tbc);
                 g_rt->FillRectangle(D2D1::RectF(left_x, yy, left_x + row_w,
                     yy + row_h_v - 2.0f * g_scale), g_brush);
                 g_brush->SetColor(to_d2d(th->foreground, 0.95f));
-                if (mode_gpu) {
-                    n2 = wsprintfW(buf2, L"%6u  %u.%u%%  %s",
-                        pp->pid, pp->gpu_pct / 10, pp->gpu_pct % 10, name);
+                if (mode_net) {
+                    wchar_t v[24]; int vl = fmt_net(v, (uint64_t)sv); v[vl] = 0;
+                    n2 = wsprintfW(buf2, L"%6u  %s  %s", pp->pid, v, name);
                 } else {
-                    n2 = wsprintfW(buf2, L"%6u  %5I64u KiB/s  %s",
-                        pp->pid, v / 1024, name);
+                    n2 = wsprintfW(buf2, L"%6u  %5u KiB/s  %s",
+                        pp->pid, (unsigned)(sv / 1024.0f), name);
                 }
                 g_rt->DrawText(buf2, n2, g_fmt_data,
                     D2D1::RectF(left_x + 6.0f * g_scale, yy,
                                 g_w_dips - left_x, yy + row_h_v), g_brush);
                 yy += row_h_v;
             }
-            #undef VAL
         } else if (g_view == VIEW_FORENSIC) {
             float ix = 0.0f;
             float iy = bar_h + VIEW_TAB_BAR_H;
@@ -1776,6 +2065,19 @@ extern "C" void render_frame(const snapshot_t *snap)
                 draw_dual_series(th, cur_va(), gx, graph_y, avail_w, graph_h,
                                  sa, NULL, hn, snap->agg_cpu_pct, 0,
                                  L"total cpu", NULL, 0);
+
+                /* cpu package temperature — top-right of the graph area */
+                if (snap->cpu_package_temp_c > 0) {
+                    wchar_t tbuf[32];
+                    int tl = wsprintfW(tbuf, L"package %d\u00B0C",
+                                       (int)(snap->cpu_package_temp_c + 0.5f));
+                    g_brush->SetColor(to_d2d(th->foreground, 0.65f));
+                    g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+                    g_rt->DrawText(tbuf, tl, g_fmt_chrome,
+                        D2D1::RectF(gx, graph_y + graph_h + 2.0f * g_scale,
+                                    gx + avail_w, graph_y + graph_h + 18.0f * g_scale),
+                        g_brush);
+                }
 
                 float gy = graph_y + graph_h + 16.0f * g_scale;
 
@@ -1813,40 +2115,49 @@ extern "C" void render_frame(const snapshot_t *snap)
                     mr.radiusY = 6.0f * g_scale;
                     g_brush->SetColor(to_d2d(th->subtle, 0.30f));
                     g_rt->FillRoundedRectangle(mr, g_brush);
-                    /* history sparkline inside the meter, faint, with the same
-                       tween shift as the big graphs so motion feels coherent
-                       across the UI */
-                    int chn = snapshot_core_hist_count();
-                    if (chn > 1) {
+                    /* history sparkline — always use the full capacity so dx
+                       is constant from the first sample (no compression). actual
+                       data is right-aligned; left side draws a flat zero baseline
+                       that scrolls off as real samples accumulate. */
+                    {
                         int maxn = (int)(meter_w / g_scale);
                         if (maxn < 2) maxn = 2;
-                        if (chn > maxn) chn = maxn;
-                        float step = meter_w / (float)(chn - 1);
+                        int avail = snapshot_core_hist_count();
+                        if (avail > maxn) avail = maxn;
+                        float step = meter_w / (float)(maxn - 1);
                         float xshift = -g_anim_phase * step;
                         D2D1_RECT_F sclip = D2D1::RectF(mx + 1.0f, my + 1.0f,
                                                         mx + meter_w - 1.0f,
                                                         my + meter_h - 1.0f);
                         g_rt->PushAxisAlignedClip(sclip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                        float px = mx + meter_w + xshift;   /* xshift is negative → slides left */
-                        float py = my + meter_h
-                                 - (snapshot_core_hist_at(c, 0) / 100.0f) * meter_h;
                         D2D1_COLOR_F sparkc = g_va[VIEW_CPU].line;
                         sparkc.a = 0.28f;
                         g_brush->SetColor(sparkc);
-                        for (int k = 1; k < chn; ++k) {
-                            float nx = px - step;
-                            float ny = my + meter_h
-                                     - (snapshot_core_hist_at(c, k) / 100.0f) * meter_h;
-                            g_rt->DrawLine(D2D1::Point2F(nx, ny),
-                                           D2D1::Point2F(px, py),
-                                           g_brush, 1.5f * g_scale);
-                            px = nx; py = ny;
+                        /* walk right-to-left: index 0 = rightmost (newest) */
+                        float px = mx + meter_w + xshift;
+                        float py = my + meter_h;
+                        for (int k = 0; k < maxn; ++k) {
+                            float val = (k < avail)
+                                ? snapshot_core_hist_at(c, k) / 100.0f
+                                : 0.0f;
+                            float ny = my + meter_h - val * meter_h;
+                            if (k > 0)
+                                g_rt->DrawLine(D2D1::Point2F(px, py),
+                                               D2D1::Point2F(px - step, ny),
+                                               g_brush, 1.5f * g_scale);
+                            py = ny;
+                            px -= step;
                         }
                         g_rt->PopAxisAlignedClip();
                     }
-                    /* user layer on top of kernel — stacked so total == user+kernel-busy */
-                    float upct = snap->cpu_core_user_pct[c] / 100.0f;
-                    float kpct = snap->cpu_core_kern_pct[c] / 100.0f;
+                    /* user layer on top of kernel — EMA-smoothed so the bars
+                       tween at 60 fps instead of jumping each 250 ms snapshot */
+                    g_core_user_ema[c] = ema_lerp(g_core_user_ema[c],
+                                                  snap->cpu_core_user_pct[c] / 100.0f);
+                    g_core_kern_ema[c] = ema_lerp(g_core_kern_ema[c],
+                                                  snap->cpu_core_kern_pct[c] / 100.0f);
+                    float upct = g_core_user_ema[c];
+                    float kpct = g_core_kern_ema[c];
                     float user_top   = my + meter_h - (upct + kpct) * meter_h;
                     float kern_top   = my + meter_h - kpct * meter_h;
                     D2D1_COLOR_F kern_c = g_va[VIEW_CPU].line;
@@ -1856,9 +2167,11 @@ extern "C" void render_frame(const snapshot_t *snap)
                     kern_c.a = 0.35f;
                     g_brush->SetColor(kern_c);
                     g_rt->FillRectangle(D2D1::RectF(mx, user_top, mx + meter_w, kern_top), g_brush);
-                    /* label */
+                    /* label — show the smoothed total for visual consistency */
+                    int total_pct = (int)((upct + kpct) * 100.0f + 0.5f);
+                    if (total_pct > 100) total_pct = 100;
                     g_brush->SetColor(to_d2d(th->foreground, 0.95f));
-                    int n2 = wsprintfW(lbl, L"core %d  %u%%", c, snap->cpu_core_pct[c]);
+                    int n2 = wsprintfW(lbl, L"core %d  %u%%", c, total_pct);
                     g_fmt_chrome->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
                     g_rt->DrawText(lbl, n2, g_fmt_chrome,
                         D2D1::RectF(mx + 8.0f * g_scale, my + 4.0f * g_scale,
@@ -1878,6 +2191,7 @@ extern "C" void render_frame(const snapshot_t *snap)
         draw_scrubber(th, 0.0f, g_scrubber_y, g_w_dips, SCRUBBER_H);
         HRESULT hr = g_rt->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
+            icon_invalidate_bitmaps();
             if (g_brush) { g_brush->Release(); g_brush = nullptr; }
             if (g_rt)    { g_rt->Release();    g_rt    = nullptr; }
         }
@@ -2078,7 +2392,7 @@ extern "C" void render_frame(const snapshot_t *snap)
             draw_cell(g_fmt_data, buf, len, xs[COL_DISK], ws[COL_DISK], y, row_h, true);
         }
         if (p->net_bps > 0) {
-            len = fmt_mem(buf, p->net_bps);
+            len = fmt_net(buf, p->net_bps);
             draw_cell(g_fmt_data, buf, len, xs[COL_NET], ws[COL_NET], y, row_h, true);
         }
 
@@ -2115,28 +2429,107 @@ extern "C" void render_frame(const snapshot_t *snap)
 
         const wchar_t *name = intern_get(p->image_name);
         if (!name) name = L"<unknown>";
+
+        /* process icon — 16x16 scaled, left edge of NAME column */
+        float icon_advance = 0.0f;
+        ID2D1Bitmap *icon = p->image_path ? icon_query(p->image_path) : nullptr;
+        if (icon) {
+            float icon_sz = 16.0f * g_scale;
+            float icon_y  = y + (row_h - icon_sz) * 0.5f;
+            float icon_x  = xs[COL_NAME] + 2.0f * g_scale;
+            g_rt->DrawBitmap(icon,
+                D2D1::RectF(icon_x, icon_y, icon_x + icon_sz, icon_y + icon_sz),
+                1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            icon_advance = icon_sz + 4.0f * g_scale;
+        }
+
         if (g_tree_mode) {
-            /* prefix with depth-indent + disclosure glyph */
+            /* tree prefix with box-drawing connecting lines so parent-child
+               relationships are immediately visible:
+               ├─ middle child     └─ last child     │  continuation */
             wchar_t ibuf[300];
             int t = (int)(packed >> 20);
             int tdepth = g_tree[t].depth;
             int has_kids = g_tree[t].has_children;
             int collapsed = is_collapsed(p->pid);
-            int indent = tdepth;
-            if (indent > 16) indent = 16;
-            int ilen = 0;
-            for (int k = 0; k < indent; ++k) {
-                ibuf[ilen++] = L' '; ibuf[ilen++] = L' ';
+            if (tdepth > 16) tdepth = 16;
+
+            /* for each depth level, determine if it's the last sibling by
+               looking ahead in the tree for a node at the same depth before
+               the parent boundary */
+            int is_last[17];
+            for (int k = 1; k <= tdepth; ++k) {
+                is_last[k] = 1;
+                for (int j = t + 1; j < g_tree_n; ++j) {
+                    int jd = g_tree[j].depth;
+                    if (jd < k) break;
+                    if (jd == k) { is_last[k] = 0; break; }
+                }
             }
-            const wchar_t *gly = has_kids ? (collapsed ? L"+ " : L"- ") : L"  ";
-            ibuf[ilen++] = gly[0]; ibuf[ilen++] = gly[1];
+
+            int ilen = 0;
+            for (int k = 1; k <= tdepth; ++k) {
+                if (k == tdepth) {
+                    ibuf[ilen++] = is_last[k] ? L'\x2514' : L'\x251C';  /* └ or ├ */
+                    ibuf[ilen++] = L'\x2500';                            /* ─ */
+                } else {
+                    ibuf[ilen++] = is_last[k] ? L' ' : L'\x2502';       /* │ or space */
+                    ibuf[ilen++] = L' ';
+                }
+            }
+            /* disclosure glyph */
+            if (has_kids) {
+                ibuf[ilen++] = collapsed ? L'\x25B8' : L'\x25BE';  /* ▸ or ▾ */
+            } else {
+                ibuf[ilen++] = L' ';
+            }
+            ibuf[ilen++] = L' ';
             const wchar_t *src = name;
             while (*src && ilen < 299) ibuf[ilen++] = *src++;
             ibuf[ilen] = 0;
-            draw_cell(g_fmt_data, ibuf, ilen, xs[COL_NAME], ws[COL_NAME], y, row_h, false);
+            draw_cell(g_fmt_data, ibuf, ilen,
+                      xs[COL_NAME] + icon_advance, ws[COL_NAME] - icon_advance,
+                      y, row_h, false);
         } else {
             draw_cell(g_fmt_data, name, lstrlenW(name),
-                      xs[COL_NAME], ws[COL_NAME], y, row_h, false);
+                      xs[COL_NAME] + icon_advance, ws[COL_NAME] - icon_advance,
+                      y, row_h, false);
+        }
+
+        /* command line args + suspended tag — dimmed, after the image name.
+           monospace font so character-count estimate works for offset. */
+        {
+            int name_len = lstrlenW(name);
+            float char_w = 7.8f * g_scale;   /* cascadia mono approx */
+            float off_x  = xs[COL_NAME] + (float)name_len * char_w + 4.0f * g_scale;
+            float rem_w  = (xs[COL_NAME] + ws[COL_NAME]) - off_x;
+
+            if (p->suspended && rem_w > 80.0f) {
+                g_brush->SetColor(to_d2d(th->accent, 0.55f));
+                draw_cell(g_fmt_data, L" (suspended)", 12, off_x, rem_w, y, row_h, false);
+                off_x += 12.0f * char_w;
+                rem_w -= 12.0f * char_w;
+            }
+
+            const wchar_t *cmdline = p->command_line ? intern_get(p->command_line) : NULL;
+            if (cmdline && rem_w > 40.0f) {
+                /* skip the exe path prefix to show just the arguments */
+                const wchar_t *args = cmdline;
+                if (*args == L'"') {
+                    args++;
+                    while (*args && *args != L'"') args++;
+                    if (*args == L'"') args++;
+                } else {
+                    while (*args && *args != L' ') args++;
+                }
+                while (*args == L' ') args++;
+                if (*args) {
+                    g_brush->SetColor(to_d2d(th->subtle, 0.55f));
+                    int alen = lstrlenW(args);
+                    draw_cell(g_fmt_data, args, alen, off_x, rem_w, y, row_h, false);
+                }
+            }
+            g_brush->SetColor(to_d2d(th->foreground, 1.0f));
         }
 
         y += row_h;
@@ -2172,6 +2565,7 @@ extern "C" void render_frame(const snapshot_t *snap)
 
     HRESULT hr2 = g_rt->EndDraw();
     if (hr2 == D2DERR_RECREATE_TARGET) {
+        icon_invalidate_bitmaps();
         if (g_brush) { g_brush->Release(); g_brush = nullptr; }
         if (g_rt)    { g_rt->Release();    g_rt    = nullptr; }
     }
@@ -2320,6 +2714,7 @@ static void draw_inspector_body(const theme_t *th, float ix, float iy, float iw,
 
 extern "C" void render_destroy()
 {
+    icon_stop();
     if (g_brush)       { g_brush->Release();       g_brush       = nullptr; }
     if (g_rt)          { g_rt->Release();          g_rt          = nullptr; }
     if (g_fmt_data)    { g_fmt_data->Release();    g_fmt_data    = nullptr; }
