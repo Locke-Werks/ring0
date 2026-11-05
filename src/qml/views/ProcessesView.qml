@@ -14,8 +14,12 @@ Item {
 
     // Column scales: cpu and gpu are percent; memory scales against the largest
     // working set so the bar says "share of the biggest", not of RAM.
-    // Re-read on every sample: the first evaluation runs before any snapshot exists.
-    readonly property real memScale: SnapshotBridge.seq >= 0 ? Math.max(256 * 1048576, (SnapshotBridge.memory().total || 0) / 16) : 1
+    // Memory rails are relative to the heaviest process, so the biggest consumer
+    // reads full and the rest are proportional to it.
+    readonly property real memScale: Math.max(64 * 1048576, SnapshotBridge.maxProcessMemory)
+    // Same for CPU: one busy core is ~3% of a 32-thread machine, so an absolute
+    // scale would never show a rail. The floor keeps idle noise from looking hot.
+    readonly property real cpuScale: Math.max(5, SnapshotBridge.maxProcessCpu)
 
     // Lowest-priority columns drop first as the window narrows, so the name
     // column never gets squeezed into ellipses.
@@ -169,15 +173,27 @@ Item {
                     opacity: row.suspended ? 0.45 : 1
                     Behavior on opacity { NumberAnimation { duration: 300 } }
 
-                    Image {
+                    Item {
                         Layout.preferredWidth: 18; Layout.preferredHeight: 18
                         Layout.rightMargin: 12
+                        // Pathless processes (System, Registry, protected images)
+                        // get a quiet mark so names stay aligned.
+                        Rectangle {
+                            visible: !row.path
+                            anchors.centerIn: parent
+                            width: 10; height: 10; radius: 2
+                            color: "transparent"
+                            border.color: Theme.faint
+                        }
+                    Image {
+                        anchors.fill: parent
                         source: row.path ? "image://procicon/" + encodeURIComponent(row.path) : ""
                         sourceSize: Qt.size(32, 32)
                         asynchronous: true
                         smooth: true
                         opacity: status === Image.Ready ? 1 : 0
                         Behavior on opacity { NumberAnimation { duration: 200 } }
+                    }
                     }
                     Item {
                         Layout.fillWidth: true
@@ -218,7 +234,7 @@ Item {
                         font.family: Theme.mono
                         font.pixelSize: 12
                     }
-                    MetricCell { Layout.preferredWidth: 96;  Layout.fillHeight: true; hue: Theme.views[1].hue; value: row.cpu;    scale: 100; text: row.cpu.toFixed(1) + "%" }
+                    MetricCell { Layout.preferredWidth: 96;  Layout.fillHeight: true; hue: Theme.views[1].hue; value: row.cpu;    scale: view.cpuScale; text: row.cpu.toFixed(1) + "%" }
                     MetricCell { Layout.preferredWidth: 110; Layout.fillHeight: true; hue: Theme.views[2].hue; value: row.memory; scale: view.memScale; text: Theme.bytes(row.memory) }
                     MetricCell { visible: view.showDisk; Layout.preferredWidth: 104; Layout.fillHeight: true; hue: Theme.views[3].hue; value: row.disk;   scale: 50 * 1048576; text: row.disk > 0 ? Theme.rate(row.disk) : "0" }
                     MetricCell { visible: view.showNet; Layout.preferredWidth: 104; Layout.fillHeight: true; hue: Theme.views[4].hue; value: row.net;    scale: 12 * 1048576; text: row.net > 0 ? Theme.rate(row.net) : "0" }

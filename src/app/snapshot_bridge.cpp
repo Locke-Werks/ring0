@@ -109,6 +109,25 @@ double SnapshotBridge::netBps() const { auto s = current(); return s ? s->net_bp
 double SnapshotBridge::memPct() const { auto s = current(); return s ? metric_of(*s, u"mem"_s) : 0; }
 int SnapshotBridge::coreCount() const { auto s = current(); return s ? int(s->cores.size()) : 0; }
 int SnapshotBridge::processCount() const { auto s = current(); return s ? int(s->processes.size()) : 0; }
+double SnapshotBridge::maxProcessMemory() const
+{
+    auto s = current();
+    double m = 0;
+    if (s)
+        for (const auto& p : s->processes) m = std::max(m, double(p.working_set));
+    return m;
+}
+
+double SnapshotBridge::maxProcessCpu() const
+{
+    auto s = current();
+    double m = 0;
+    if (s)
+        for (const auto& p : s->processes)
+            if (p.pid != 0) m = std::max(m, double(p.cpu_pct));
+    return m;
+}
+
 double SnapshotBridge::cpuTempC() const { auto s = current(); return s ? s->cpu_temp_c : -1; }
 
 double SnapshotBridge::coreLoad(int core) const

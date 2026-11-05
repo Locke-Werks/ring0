@@ -8,6 +8,8 @@
 #include <QQuickAsyncImageProvider>
 #include <QRunnable>
 #include <QThreadPool>
+
+#include <algorithm>
 #include <QUrl>
 
 #include <optional>
@@ -46,20 +48,31 @@ QImage hicon_to_image(HICON h)
     return img;
 }
 
-QImage load_icon(const QString& path, bool large)
+// Returns the process's own icon, or a null image if it has none we can read.
+// Never the generic fallback: that is decided by the caller and never cached.
+QImage load_icon(const QString& path, int px)
 {
-    const UINT size = large ? SHGFI_LARGEICON : SHGFI_SMALLICON;
+    if (path.isEmpty()) return {};
+    const auto w = path.toStdWString();
+    // Straight from the exe's resources at the exact size: crisp at any DPI,
+    // no shell, no COM, and safe to call from several threads.
+    HICON h = nullptr;
+    UINT id = 0;
+    if (PrivateExtractIconsW(w.c_str(), 0, px, px, &h, &id, 1, LR_DEFAULTCOLOR) == 1 && h)
+        return hicon_to_image(h);
+    // Some images carry no icon group of their own but the shell maps one
+    // (store apps, redirected binaries).
     SHFILEINFOW info{};
-    if (!path.isEmpty()) {
-        const auto w = path.toStdWString();
-        if (SHGetFileInfoW(w.c_str(), 0, &info, sizeof(info), SHGFI_ICON | size) && info.hIcon)
-            return hicon_to_image(info.hIcon);
-    }
-    // USEFILEATTRIBUTES asks the shell for the generic .exe icon without
-    // touching the disk, which is what a denied or vanished image needs.
-    info = {};
+    if (SHGetFileInfoW(w.c_str(), 0, &info, sizeof(info), SHGFI_ICON | (px > 16 ? SHGFI_LARGEICON : SHGFI_SMALLICON)) && info.hIcon)
+        return hicon_to_image(info.hIcon);
+    return {};
+}
+
+QImage generic_icon(int px)
+{
+    SHFILEINFOW info{};
     if (SHGetFileInfoW(L"x.exe", FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
-                       SHGFI_ICON | SHGFI_USEFILEATTRIBUTES | size) && info.hIcon)
+                       SHGFI_ICON | SHGFI_USEFILEATTRIBUTES | (px > 16 ? SHGFI_LARGEICON : SHGFI_SMALLICON)) && info.hIcon)
         return hicon_to_image(info.hIcon);
     return {};
 }
@@ -79,17 +92,20 @@ public:
 
     void run() override
     {
-        const bool large = requested_.isValid() && requested_.width() > 16;
-        const QString key = path_.toLower() + (large ? u"|L" : u"|S");
+        const int px = requested_.isValid() ? std::max(16, requested_.width()) : 32;
+        const QString key = path_.toLower() + u'|' + QString::number(px);
         if (auto hit = cache_.find(key)) {
             image_ = *hit;
         } else {
-            // The shell resolves icon handlers through COM, and pool threads
-            // start with no apartment.
+            // The shell fallback resolves icon handlers through COM, and pool
+            // threads start with no apartment.
             const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            image_ = load_icon(path_, large);
-            if (SUCCEEDED(hr)) CoUninitialize();
+            image_ = load_icon(path_, px);
+            // Only real icons are cached; a failure may be transient and must not
+            // pin the generic icon to this path for the rest of the session.
             if (!image_.isNull()) cache_.put(key, image_);
+            else image_ = generic_icon(px);
+            if (SUCCEEDED(hr)) CoUninitialize();
         }
         if (requested_.isValid() && !image_.isNull() && image_.size() != requested_)
             image_ = image_.scaled(requested_, Qt::KeepAspectRatio, Qt::SmoothTransformation);
@@ -111,6 +127,8 @@ public:
         pool_.start(r);
         return r;
     }
+
+    IconProvider() { pool_.setMaxThreadCount(2); }
 
 private:
     IconCache cache_;
