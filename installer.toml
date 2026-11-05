@@ -5,7 +5,7 @@
 
 [product]
 name         = "ring0"
-version      = "0.2.0"
+version      = "0.2.1"
 publisher    = "Locke Werks"
 description  = "Native Windows task manager, rendered on the GPU."
 copyright    = "Copyright (c) 2026 Locke Werks. GPL-3.0-or-later."
@@ -73,8 +73,26 @@ label   = "Install the PawnIO driver for CPU and memory sensors"
 detail  = "Adds a signed kernel driver from pawnio.eu. Without it, temperatures, power and clocks are not shown; everything else works."
 default = true
 
+[[options]]
+id      = "replace_taskmgr"
+label   = "Use ring0 as the Task Manager (Ctrl+Shift+Esc, Ctrl+Alt+Del, taskbar menu)"
+detail  = "Sets the Image File Execution Options Debugger value on taskmgr.exe, as Process Explorer does. EDR and antivirus products watch that key because malware abuses it; yours may raise an alert or block the change. Uninstalling ring0 restores the stock Task Manager."
+default = true
+
 [[actions]]
 type = "arp"
+
+# Windows launches the Debugger with the original taskmgr command line appended,
+# so the value is quoted (Program Files has a space) and ring0 ignores the extra
+# arguments. Forge captures the prior state and restores it on uninstall.
+[[actions]]
+type       = "registry_write"
+when       = "replace_taskmgr"
+hive       = "HKLM"
+key        = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe'
+name       = "Debugger"
+value      = '"{InstallDir}\ring0.exe"'
+value_type = "sz"
 
 [[actions]]
 type   = "shortcut"

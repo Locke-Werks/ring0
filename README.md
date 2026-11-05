@@ -53,7 +53,15 @@ Without it those fields are absent and everything else works.
 ## Install
 
 Download the installer from [releases](https://github.com/Locke-Werks/ring0/releases).
-It checks the OS build and sudo before installing anything.
+It checks the OS build and sudo before installing anything. Two options, both on by
+default:
+
+- **PawnIO driver**, for CPU and memory sensors. Unattended: `/O:pawnio=off`.
+- **Use ring0 as the Task Manager**, so Ctrl+Shift+Esc, Ctrl+Alt+Del and the taskbar
+  menu open ring0. This sets the Image File Execution Options `Debugger` value on
+  `taskmgr.exe`, as Process Explorer does. EDR and antivirus products watch that key
+  because malware abuses it, and may alert on or block the change. Uninstalling
+  restores the stock Task Manager. Unattended: `/O:replace_taskmgr=off`.
 
 ## Build
 
