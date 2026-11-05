@@ -158,6 +158,32 @@ double SnapshotBridge::handleCount() const
 
 double SnapshotBridge::uptimeSeconds() const { auto s = current(); return s ? double(s->tick_ms) / 1000.0 : 0; }
 
+QList<double> SnapshotBridge::ccdTemps() const
+{
+    QList<double> out;
+    if (auto s = current()) for (float t : s->ccd_temps_c) out.push_back(t);
+    return out;
+}
+
+double SnapshotBridge::cpuPowerW() const { auto s = current(); return s ? s->cpu_power_w : -1; }
+
+double SnapshotBridge::avgClockMhz() const
+{
+    auto s = current();
+    if (!s) return -1;
+    double sum = 0;
+    int n = 0;
+    for (float m : s->core_mhz) if (m > 0) { sum += m; ++n; }
+    return n ? sum / n : -1;
+}
+
+double SnapshotBridge::coreClockMhz(int core) const
+{
+    auto s = current();
+    if (!s || core < 0 || std::size_t(core) >= s->core_mhz.size()) return -1;
+    return s->core_mhz[std::size_t(core)];
+}
+
 double SnapshotBridge::cpuTempC() const { auto s = current(); return s ? s->cpu_temp_c : -1; }
 
 double SnapshotBridge::coreLoad(int core) const

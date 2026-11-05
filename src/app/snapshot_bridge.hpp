@@ -32,6 +32,9 @@ class SnapshotBridge : public QObject {
     Q_PROPERTY(double threadCount READ threadCount NOTIFY changed)
     Q_PROPERTY(double handleCount READ handleCount NOTIFY changed)
     Q_PROPERTY(double uptimeSeconds READ uptimeSeconds NOTIFY changed)
+    Q_PROPERTY(QList<double> ccdTemps READ ccdTemps NOTIFY changed)
+    Q_PROPERTY(double cpuPowerW READ cpuPowerW NOTIFY changed)
+    Q_PROPERTY(double avgClockMhz READ avgClockMhz NOTIFY changed)
 
 public:
     static SnapshotBridge* instance();
@@ -59,6 +62,10 @@ public:
     double threadCount() const;
     double handleCount() const;
     double uptimeSeconds() const;
+    QList<double> ccdTemps() const;
+    double cpuPowerW() const;
+    double avgClockMhz() const;     // mean effective clock of cores that report one; -1 if none
+    Q_INVOKABLE double coreClockMhz(int core) const;
 
     Q_INVOKABLE double coreLoad(int core) const;
     // Detail for the device views; plain maps so QML can bind without extra types.

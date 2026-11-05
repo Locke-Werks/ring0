@@ -25,12 +25,12 @@ Item {
 
         RowLayout {
             Layout.fillWidth: true
-            Layout.preferredHeight: 170
-            Layout.maximumHeight: 170
+            Layout.preferredHeight: 210
+            Layout.maximumHeight: 210
             spacing: 14
 
             Panel {
-                Layout.preferredWidth: 300
+                Layout.preferredWidth: 380
                 Layout.fillHeight: true
                 hue: view.hue
                 heat: SnapshotBridge.cpuTotal / 100
@@ -60,13 +60,16 @@ Item {
                     GridLayout {
                         columns: 4
                         columnSpacing: 18
-                        rowSpacing: 2
+                        rowSpacing: 6
                         Repeater {
                             model: [
                                 { k: "threads", v: () => view.count(SnapshotBridge.threadCount) },
                                 { k: "handles", v: () => view.count(SnapshotBridge.handleCount) },
                                 { k: "up", v: () => view.uptime(SnapshotBridge.uptimeSeconds) },
-                                { k: "temp", v: () => SnapshotBridge.cpuTempC >= 0 ? SnapshotBridge.cpuTempC.toFixed(0) + "°c" : "n/a" }
+                                { k: "temp", v: () => SnapshotBridge.cpuTempC >= 0 ? SnapshotBridge.cpuTempC.toFixed(0) + "°C" : "n/a" },
+                                { k: "power", v: () => SnapshotBridge.cpuPowerW >= 0 ? SnapshotBridge.cpuPowerW.toFixed(0) + " W" : "n/a" },
+                                { k: "clock", v: () => SnapshotBridge.avgClockMhz > 0 ? (SnapshotBridge.avgClockMhz / 1000).toFixed(2) + " GHz" : "n/a" },
+                                { k: "chiplets", v: () => SnapshotBridge.ccdTemps.length ? SnapshotBridge.ccdTemps.map(t => t.toFixed(0) + "°").join("  ") : "n/a" }
                             ]
                             delegate: Column {
                                 required property var modelData
@@ -161,6 +164,16 @@ Item {
                         color: view.kernelHue
                         maxValue: 100
                         lineWidth: 1
+                    }
+                    Text {
+                        // Effective clock, shown only when the CPU reports one.
+                        readonly property real mhz: SnapshotBridge.seq >= 0 ? SnapshotBridge.coreClockMhz(cell.index) : -1
+                        visible: mhz > 0
+                        x: 30; y: 8
+                        text: (mhz / 1000).toFixed(2) + " GHz"
+                        color: Theme.faint
+                        font.family: Theme.mono
+                        font.pixelSize: 11
                     }
                     Text {
                         x: 11; y: 8
