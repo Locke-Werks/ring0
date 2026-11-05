@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "core/sampler.hpp"
+#include "core/etw_parse.hpp"
 
 #include <windows.h>
 #include <evntcons.h>
@@ -13,7 +14,9 @@
 #include <utility>
 
 // NT Kernel Logger session: DiskIo read/write and TcpIp/UdpIp send/recv, folded into
-// cumulative per-pid byte counts. Only one kernel logger can exist machine-wide, so an
+// cumulative per-pid byte counts. Thread events are traced too: disk completions name
+// their issuing thread rather than a process, so a tid -> pid map resolves them.
+// Only one kernel logger can exist machine-wide, so an
 // orphan left by a crashed run is stopped and the start retried, as the legacy code did.
 
 namespace ring0 {
@@ -23,6 +26,8 @@ constexpr GUID kSystemTraceGuid =
     {0x9E814AAD, 0x3204, 0x11D2, {0x9A, 0x82, 0x00, 0x60, 0x08, 0xA8, 0x69, 0x39}};
 constexpr GUID kDiskIoGuid =
     {0x3D6FA8D4, 0xFE05, 0x11D0, {0x9D, 0xDA, 0x00, 0xC0, 0x4F, 0xD7, 0xBA, 0x7C}};
+constexpr GUID kThreadGuid =
+    {0x3D6FA8D1, 0xFE05, 0x11D0, {0x9D, 0xDA, 0x00, 0xC0, 0x4F, 0xD7, 0xBA, 0x7C}};
 constexpr GUID kTcpIpGuid =
     {0x9A280AC0, 0xC8E0, 0x11D1, {0x84, 0xE2, 0x00, 0xC0, 0x4F, 0xB9, 0x98, 0xA2}};
 constexpr GUID kUdpIpGuid =
@@ -30,10 +35,10 @@ constexpr GUID kUdpIpGuid =
 
 // Kernel classic-event opcodes.
 constexpr UCHAR kDiskRead = 10, kDiskWrite = 11;
+// Thread start/end, and the rundown the kernel logger emits for threads already running.
+constexpr UCHAR kThreadStart = 1, kThreadEnd = 2, kThreadDcStart = 3, kThreadDcEnd = 4;
 constexpr UCHAR kNetSend = 10, kNetRecv = 11, kNetSendV6 = 26, kNetRecvV6 = 27;
 
-// DiskIo_TypeGroup1: TransferSize is the third ULONG.
-constexpr std::size_t kDiskTransferOffset = 2 * sizeof(ULONG);
 // TcpIp/UdpIp send/recv (v4 and v6): PID then size lead the payload.
 constexpr std::size_t kNetHeadBytes = 2 * sizeof(ULONG);
 
@@ -136,7 +141,7 @@ private:
 
     void start() noexcept {
         PropsBuf buf;
-        const ULONG flags = EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_NETWORK_TCPIP;
+        const ULONG flags = EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_NETWORK_TCPIP;
         fill_props(buf, flags);
         TRACEHANDLE h = 0;
         ULONG r = StartTraceW(&h, KERNEL_LOGGER_NAMEW, buf.get());
@@ -194,13 +199,30 @@ private:
         const auto& hdr = ev->EventHeader;
         const UCHAR op = hdr.EventDescriptor.Opcode;
 
+        if (IsEqualGUID(hdr.ProviderId, kThreadGuid)) {
+            const auto ids = etw::thread_ids(ev->UserData, ev->UserDataLength);
+            if (!ids) return;
+            try {
+                if (op == kThreadStart || op == kThreadDcStart) self->threads_[ids->tid] = ids->pid;
+                else if (op == kThreadEnd || op == kThreadDcEnd) self->threads_.erase(ids->tid);
+            } catch (...) {
+            }
+            return;
+        }
+
         if (IsEqualGUID(hdr.ProviderId, kDiskIoGuid)) {
-            if ((op != kDiskRead && op != kDiskWrite) ||
-                ev->UserDataLength < kDiskTransferOffset + sizeof(ULONG))
-                return;
-            const std::uint32_t pid = hdr.ProcessId;
+            if (op != kDiskRead && op != kDiskWrite) return;
+            const auto size = etw::disk_transfer_size(ev->UserData, ev->UserDataLength);
+            if (!size) return;
+            const std::size_t ptr = (hdr.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) ? 4 : 8;
+            std::uint32_t pid = 0;
+            if (const auto tid = etw::disk_issuing_tid(ev->UserData, ev->UserDataLength, ptr)) {
+                if (const auto it = self->threads_.find(*tid); it != self->threads_.end())
+                    pid = it->second;
+            }
+            if (pid == 0) pid = hdr.ProcessId;
             if (pid == 0 || pid == 0xFFFFFFFFu) return;
-            self->add(pid, read_ulong(ev, kDiskTransferOffset), 0);
+            self->add(pid, *size, 0);
             return;
         }
 
@@ -225,6 +247,8 @@ private:
     }
 
     std::mutex mu_;
+    // Touched only by the consumer thread inside on_event, so it needs no lock.
+    std::unordered_map<std::uint32_t, std::uint32_t> threads_;
     std::unordered_map<std::uint32_t, Totals> totals_;
     TRACEHANDLE session_ = 0;
     TRACEHANDLE consumer_ = 0;
