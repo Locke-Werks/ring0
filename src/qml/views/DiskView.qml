@@ -23,14 +23,16 @@ Item {
                 Layout.fillHeight: true
                 hue: view.hue
                 name: "disk " + index
-                detail: d.model || ""
+                detail: (d.model || "") + (d.volumes ? "  ·  " + d.volumes : "")
+                    + (d.capacity ? "  ·  " + Theme.bytes(d.free || 0) + " free of " + Theme.bytes(d.capacity) : "")
                 metricA: "disk:" + index + ":r"
                 metricB: "disk:" + index + ":w"
                 labelA: "read"
                 labelB: "write"
                 valueA: d.read || 0
                 valueB: d.write || 0
-                extra: (d.active || 0).toFixed(0) + "% active"
+                // Temperature leads: it is the number that needs attention first on an NVMe drive.
+                extra: ((d.temp || -1) >= 0 ? d.temp.toFixed(0) + "°C  ·  " : "") + (d.active || 0).toFixed(0) + "% active"
                 extraLevel: (d.active || 0) / 100
             }
         }

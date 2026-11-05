@@ -62,6 +62,10 @@ struct Disk {
     std::wstring model;
     float read_bps = 0, write_bps = 0;
     float active_pct = 0;
+    float temp_c = -1;            // drive-reported temperature, -1 if unavailable
+    std::wstring volumes;         // mounted drive letters, e.g. "C: D:"
+    std::uint64_t capacity = 0;   // bytes, whole device
+    std::uint64_t free_bytes = 0; // bytes free across its mounted volumes
 };
 
 struct NetIf {
@@ -91,7 +95,10 @@ struct Snapshot {
     std::vector<Process> processes;
     std::vector<CoreLoad> cores;
     float cpu_total = 0;
-    float cpu_temp_c = -1;        // -1 when no thermal zone reports
+    float cpu_temp_c = -1;        // package / Tdie; -1 when nothing reports
+    std::vector<float> ccd_temps_c;   // per chiplet (AMD) or per core (Intel); empty if unavailable
+    float cpu_power_w = -1;           // package power from the energy counter; -1 if unavailable
+    std::vector<float> core_mhz;      // effective clock per logical core; empty if unavailable
     Memory memory;
     std::vector<Disk> disks;
     std::vector<NetIf> ifaces;

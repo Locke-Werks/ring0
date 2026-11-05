@@ -29,11 +29,22 @@ QtObject {
     readonly property int railWidth: 184
     readonly property int radius: 6
 
+    // Units keep their real case even in the lowercase UI: "mb" would read as
+    // millibits, and the bits/bytes distinction is exactly what a speed test
+    // comparison turns on.
     function bytes(v) {
-        const u = ["b", "kb", "mb", "gb", "tb"];
+        const u = ["B", "KB", "MB", "GB", "TB"];
         let i = 0;
         while (v >= 1024 && i < u.length - 1) { v /= 1024; ++i; }
-        return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + " " + u[i];
+        return (i === 0 ? v.toFixed(0) : v.toFixed(v < 10 ? 2 : 1)) + " " + u[i];
     }
     function rate(v) { return bytes(v) + "/s"; }
+    // Network traffic in bits per second, decimal, the way links and speed tests are quoted.
+    function bitrate(bytesPerSec) {
+        let v = bytesPerSec * 8;
+        const u = ["bps", "Kbps", "Mbps", "Gbps", "Tbps"];
+        let i = 0;
+        while (v >= 1000 && i < u.length - 1) { v /= 1000; ++i; }
+        return (i === 0 ? v.toFixed(0) : v.toFixed(v < 10 ? 2 : 1)) + " " + u[i];
+    }
 }

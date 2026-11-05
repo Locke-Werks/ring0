@@ -196,7 +196,11 @@ QVariantList SnapshotBridge::disks() const
             {u"model"_s, QString::fromStdWString(d.model)},
             {u"read"_s, double(d.read_bps)},
             {u"write"_s, double(d.write_bps)},
-            {u"active"_s, double(d.active_pct)}});
+            {u"active"_s, double(d.active_pct)},
+            {u"temp"_s, double(d.temp_c)},
+            {u"volumes"_s, QString::fromStdWString(d.volumes)},
+            {u"capacity"_s, double(d.capacity)},
+            {u"free"_s, double(d.free_bytes)}});
     return out;
 }
 

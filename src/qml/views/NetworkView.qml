@@ -8,13 +8,6 @@ Item {
     readonly property color hue: Theme.views[4].hue
     property var ifaces: SnapshotBridge.seq >= 0 ? SnapshotBridge.ifaces() : []
 
-    function speed(bps) {
-        const bits = bps * 8;
-        if (bits >= 1e9) return (bits / 1e9).toFixed(bits % 1e9 ? 1 : 0) + " gbit";
-        if (bits >= 1e6) return (bits / 1e6).toFixed(0) + " mbit";
-        return (bits / 1e3).toFixed(0) + " kbit";
-    }
-
     GridLayout {
         anchors.fill: parent
         anchors.margins: 20
@@ -36,9 +29,11 @@ Item {
                 labelB: "send"
                 valueA: n.rx || 0
                 valueB: n.tx || 0
-                // link speed is in bits/s; the graph is bytes/s
-                ceiling: 0
-                extra: n.link ? view.speed(n.link / 8) : ""
+                minScale: 256 * 1024
+                bits: true
+                // Link speed is bits/s; traffic is bytes/s. The meter is link utilisation.
+                extra: n.link ? Theme.bitrate(n.link / 8) + " link" : ""
+                extraLevel: n.link ? ((n.rx || 0) + (n.tx || 0)) * 8 / n.link : -1
             }
         }
     }

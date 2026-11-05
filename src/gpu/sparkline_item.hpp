@@ -26,6 +26,13 @@ class SparklineItem : public QQuickItem {
     Q_PROPERTY(bool fill READ fill WRITE setFill NOTIFY fillChanged)
     Q_PROPERTY(QList<double> values READ values WRITE setValues NOTIFY valuesChanged)
     Q_PROPERTY(double lineWidth READ lineWidth WRITE setLineWidth NOTIFY lineWidthChanged)
+    // Auto-scale never zooms in past this, so trickle traffic stays near the baseline.
+    Q_PROPERTY(double minScale READ minScale WRITE setMinScale NOTIFY minScaleChanged)
+    // The scale currently applied (eased), for an on-graph reference label.
+    Q_PROPERTY(double scaleTop READ scaleTop NOTIFY scaleTopChanged)
+    // Peak of this series' own visible data (with headroom and the minScale floor),
+    // regardless of maxValue. Lets two graphs agree on one shared scale.
+    Q_PROPERTY(double dataPeak READ dataPeak NOTIFY dataPeakChanged)
 
 public:
     explicit SparklineItem(QQuickItem* parent = nullptr);
@@ -44,6 +51,10 @@ public:
     void setValues(const QList<double>& v);
     double lineWidth() const { return line_width_; }
     void setLineWidth(double w);
+    double minScale() const { return min_scale_; }
+    void setMinScale(double v);
+    double scaleTop() const { return top_; }
+    double dataPeak() const { return data_peak_; }
 
 signals:
     void metricChanged();
@@ -53,6 +64,9 @@ signals:
     void fillChanged();
     void valuesChanged();
     void lineWidthChanged();
+    void minScaleChanged();
+    void scaleTopChanged();
+    void dataPeakChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* old, UpdatePaintNodeData*) override;
@@ -73,6 +87,9 @@ private:
     double max_ = 100.0;
     bool fill_ = true;
     double line_width_ = 1.5;
+    double min_scale_ = 1.0;
+    double reported_top_ = 0;
+    double data_peak_ = 0;
     QList<double> user_values_;
 
     std::vector<Knot> knots_;     // oldest first; times in timebase ms

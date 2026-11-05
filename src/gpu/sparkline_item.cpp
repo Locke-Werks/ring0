@@ -148,6 +148,7 @@ void SparklineItem::setSamples(int n) { if (n != samples_) { samples_ = n; emit 
 void SparklineItem::setColor(const QColor& c) { if (c != color_) { color_ = c; emit colorChanged(); update(); } }
 void SparklineItem::setFill(bool f) { if (f != fill_) { fill_ = f; emit fillChanged(); update(); } }
 void SparklineItem::setMaxValue(double v) { if (v != max_) { max_ = v; emit maxValueChanged(); update(); } }
+void SparklineItem::setMinScale(double v) { if (v != min_scale_) { min_scale_ = v; emit minScaleChanged(); update(); } }
 void SparklineItem::setLineWidth(double w) { if (w != line_width_) { line_width_ = w; emit lineWidthChanged(); update(); } }
 
 void SparklineItem::setValues(const QList<double>& v)
@@ -177,6 +178,11 @@ void SparklineItem::refresh()
     }
     knots_ = std::move(next);
     geometry_dirty_ = true;
+    {
+        double peak = std::max(1.0, min_scale_);
+        for (const auto& k : knots_) peak = std::max(peak, k.value * 1.08);
+        if (peak != data_peak_) { data_peak_ = peak; emit dataPeakChanged(); }
+    }
     if (top_ <= 0) top_ = targetTop();
     update();
 }
@@ -184,7 +190,7 @@ void SparklineItem::refresh()
 double SparklineItem::targetTop() const
 {
     if (max_ > 0) return max_;
-    double peak = 1.0;
+    double peak = std::max(1.0, min_scale_);
     for (const auto& k : knots_) peak = std::max(peak, k.value);
     // A little headroom keeps the line off the top edge where the glow would clip.
     return peak * 1.08;
@@ -204,6 +210,8 @@ void SparklineItem::onFrame()
     const double target = targetTop();
     const double k = 1.0 - std::exp(-std::max(0.0, dt) / kScaleTauMs);
     top_ = top_ <= 0 ? target : top_ + (target - top_) * k;
+    // The label only needs to move when the change would show in its digits.
+    if (std::abs(top_ - reported_top_) > reported_top_ * 0.01) { reported_top_ = top_; emit scaleTopChanged(); }
 
     // Live graphs and a scale still settling both need the next frame.
     if (live_ || std::abs(target - top_) > target * 1e-4) update();

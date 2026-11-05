@@ -83,7 +83,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.right: col.modelData.key === "name" ? undefined : parent.right
                             anchors.rightMargin: 8
-                            text: col.modelData.label + (col.active ? (proxy.descending ? "  ↓" : "  ↑") : "")
+                            text: col.modelData.label + (col.active ? (proxy.descending ? "  â†“" : "  â†‘") : "")
                             color: col.active ? view.hue : (ma.containsMouse ? Theme.text : Theme.dim)
                             font.family: Theme.font
                             font.pixelSize: 12
@@ -298,7 +298,7 @@ Item {
         }
 
         MenuItem { text: menu.suspended ? "resume" : "suspend"; onTriggered: menu.suspended ? ProcessActions.resume(menu.pid) : ProcessActions.suspend(menu.pid) }
-        MenuItem { text: "end process�"; onTriggered: confirmEnd.ask(menu.pid, menu.name) }
+        MenuItem { text: "end process…"; onTriggered: confirmEnd.ask(menu.pid, menu.name) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: Theme.line } }
         Menu {
             title: "priority"
@@ -308,7 +308,7 @@ Item {
                 delegate: MenuItem {
                     required property int index
                     required property string modelData
-                    text: (menu.priority === index ? "•  " : "    ") + modelData
+                    text: (menu.priority === index ? "â€¢  " : "    ") + modelData
                     onTriggered: ProcessActions.setPriority(menu.pid, index)
                 }
             }

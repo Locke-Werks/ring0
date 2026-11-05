@@ -41,6 +41,10 @@ public:
     Result<std::size_t> execute(const char* function, std::span<const std::uint64_t> in,
                                 std::span<std::uint64_t> out) const noexcept;
 
+    // Every register read the modules expose takes one cell and returns one, so this keeps
+    // call sites from spelling out the spans each time.
+    Result<std::uint64_t> call1(const char* function, std::uint64_t arg) const noexcept;
+
     explicit operator bool() const noexcept { return handle_ != nullptr; }
     void close() noexcept;
 

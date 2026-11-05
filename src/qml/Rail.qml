@@ -17,7 +17,7 @@ Rectangle {
         () => SnapshotBridge.cpuTotal.toFixed(0) + "%",
         () => SnapshotBridge.memPct.toFixed(0) + "%",
         () => Theme.rate(SnapshotBridge.diskBps),
-        () => Theme.rate(SnapshotBridge.netBps),
+        () => Theme.bitrate(SnapshotBridge.netBps),
         () => SnapshotBridge.gpuTotal.toFixed(0) + "%",
         () => ""
     ]

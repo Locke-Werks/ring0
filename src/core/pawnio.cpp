@@ -143,4 +143,13 @@ Result<std::size_t> Module::execute(const char* function, std::span<const std::u
     return static_cast<std::size_t>(written);
 }
 
+Result<std::uint64_t> Module::call1(const char* function, std::uint64_t arg) const noexcept {
+    std::array<std::uint64_t, 1> in{arg};
+    std::array<std::uint64_t, 1> out{};
+    auto r = execute(function, in, out);
+    if (!r) return std::unexpected(r.error());
+    if (*r != 1) return std::unexpected(Error{HRESULT_FROM_WIN32(ERROR_INVALID_DATA), function});
+    return out[0];
+}
+
 } // namespace ring0::pawnio

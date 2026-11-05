@@ -20,16 +20,69 @@ Panel {
     property real ceiling: 0         // full-scale value, or 0 to auto-scale
     property string extra: ""        // right-aligned status (active %, link speed)
     property real extraLevel: -1     // 0..1 drives a small meter beside `extra`; -1 hides it
+    property real minScale: 1048576  // auto-scale floor, bytes/s
+    property bool bits: false        // show rates as bits/s (network) instead of bytes/s
+    function fmt(v) { return bits ? Theme.bitrate(v) : Theme.rate(v) }
+    // Axis ticks share the unit of the scale's top, so one graph never mixes KB and MB.
+    function tick(v) {
+        const top = sharedTop * (bits ? 8 : 1)
+        const base = bits ? 1000 : 1024
+        const units = bits ? ["bps", "Kbps", "Mbps", "Gbps", "Tbps"] : ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"]
+        let i = 0, div = 1
+        while (top >= div * base && i < units.length - 1) { div *= base; ++i }
+        const n = v * (bits ? 8 : 1) / div
+        return (Math.round(n * 10) / 10).toString() + " " + units[i]
+    }
 
     readonly property color hueB: Qt.hsla((hue.hslHue + 0.11) % 1.0, Math.min(1, hue.hslSaturation * 1.1), Math.min(0.78, hue.hslLightness * 1.25), 1)
     heat: ceiling > 0 ? (valueA + valueB) / ceiling : Math.min(1, (valueA + valueB) / (64 * 1048576))
 
+    // One scale for both directions, set by whichever is larger.
+    // Rounded up to 1, 2 or 5 x 10^n (in binary units) so the gridlines land on round values.
+    readonly property real sharedTop: ceiling > 0 ? ceiling : niceCeil(Math.max(sa.dataPeak, sb.dataPeak, minScale))
+    function niceCeil(v) {
+        const steps = [1, 2, 4, 5, 8, 10]
+        // Bits are quoted in decimal steps, bytes in binary ones.
+        const base = bits ? 1000 : 1024
+        if (bits) v *= 8
+        let unit = 1
+        while (v > unit * base) unit *= base
+        const x = v / unit
+        let mag = Math.pow(10, Math.floor(Math.log10(Math.max(x, 1e-9))))
+        const scale = bits ? 1 / 8 : 1
+        for (const st of steps) if (st * mag >= x) return st * mag * unit * scale
+        return 10 * mag * unit * scale
+    }
+
     Item {
+        id: plot
         anchors.fill: parent
         anchors.margins: 1
         anchors.topMargin: 64
-        Sparkline { anchors.fill: parent; metric: card.metricA; samples: 120; color: card.hue; maxValue: card.ceiling > 0 ? card.ceiling : -1; lineWidth: 1.75 }
-        Sparkline { anchors.fill: parent; metric: card.metricB; samples: 120; color: card.hueB; maxValue: card.ceiling > 0 ? card.ceiling : -1; fill: false; lineWidth: 1.5 }
+
+        // Axis: three gridlines with their values, following the eased scale.
+        Repeater {
+            model: [0.25, 0.5, 0.75]
+            delegate: Item {
+                required property real modelData
+                width: plot.width
+                y: plot.height * (1 - modelData)
+                Rectangle { width: parent.width; height: 1; color: Theme.line; opacity: 0.55 }
+                Text {
+                    // Left edge holds the oldest data, so labels stay clear of the live line.
+                    x: 10
+                    anchors.bottom: parent.top
+                    anchors.bottomMargin: 1
+                    text: card.tick(card.sharedTop * modelData)
+                    color: Theme.faint
+                    font.family: Theme.mono
+                    font.pixelSize: 10
+                }
+            }
+        }
+
+        Sparkline { id: sa; anchors.fill: parent; metric: card.metricA; samples: 120; color: card.hue; maxValue: card.sharedTop; minScale: card.minScale; lineWidth: 1.75 }
+        Sparkline { id: sb; anchors.fill: parent; metric: card.metricB; samples: 120; color: card.hueB; maxValue: card.sharedTop; minScale: card.minScale; fill: false; lineWidth: 1.5 }
     }
 
     RowLayout {
@@ -71,7 +124,7 @@ Panel {
                 Text {
                     property real shown: modelData.value
                     Behavior on shown { NumberAnimation { duration: 1000; easing.type: Easing.Linear } }
-                    text: modelData.label + "  " + Theme.rate(shown)
+                    text: modelData.label + "  " + card.fmt(shown)
                     color: Theme.text
                     font.family: Theme.font
                     font.pixelSize: 14
