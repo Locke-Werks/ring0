@@ -212,9 +212,37 @@ void SparklineItem::onFrame()
     top_ = top_ <= 0 ? target : top_ + (target - top_) * k;
     // The label only needs to move when the change would show in its digits.
     if (std::abs(top_ - reported_top_) > reported_top_ * 0.01) { reported_top_ = top_; emit scaleTopChanged(); }
+    updatePeak();
 
     // Live graphs and a scale still settling both need the next frame.
     if (live_ || std::abs(target - top_) > target * 1e-4) update();
+}
+
+void SparklineItem::updatePeak()
+{
+    const double w = width(), h = height();
+    // Same time-to-x mapping as sparkline.vert.
+    const double px_per_ms = w / double(std::max(samples_ - 1, 1) * tb::kPeriodMs);
+    const double t0 = knots_.back().time;
+    double best = -1, bx = 0;
+    for (const auto& k : knots_) {
+        const double x = w + (k.time - t0 - age_ms_) * px_per_ms;
+        // Only samples on screen: the padding knots sit off the left edge, and
+        // fresh samples wait past the right edge until their time comes.
+        // >= hands ties to the newest, so the tag does not sit on a point about to exit.
+        if (x < 0 || x > w) continue;
+        if (k.value >= best) { best = k.value; bx = x; }
+    }
+    const bool vis = best > 0 && w > 0 && h > 0;
+    const double top = top_ > 0 ? top_ : targetTop();
+    const double by = vis ? h - std::clamp(best / std::max(top, 1e-6), 0.0, 1.0) * h : 0;
+    if (vis == peak_visible_ && best == peak_value_ && std::abs(bx - peak_x_) < 0.5 && std::abs(by - peak_y_) < 0.5)
+        return;
+    peak_visible_ = vis;
+    peak_value_ = vis ? best : 0;
+    peak_x_ = bx;
+    peak_y_ = by;
+    emit peakChanged();
 }
 
 void SparklineItem::attachWindow(QQuickWindow* w)

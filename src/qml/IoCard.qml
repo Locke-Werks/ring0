@@ -22,6 +22,7 @@ Panel {
     property real extraLevel: -1     // 0..1 drives a small meter beside `extra`; -1 hides it
     property real minScale: 1048576  // auto-scale floor, bytes/s
     property bool bits: false        // show rates as bits/s (network) instead of bytes/s
+    property bool peakTags: false    // label each trace's highest visible point
     function fmt(v) { return bits ? Theme.bitrate(v) : Theme.rate(v) }
     // Axis ticks share the unit of the scale's top, so one graph never mixes KB and MB.
     function tick(v) {
@@ -83,6 +84,28 @@ Panel {
 
         Sparkline { id: sa; anchors.fill: parent; metric: card.metricA; samples: 120; color: card.hue; maxValue: card.sharedTop; minScale: card.minScale; lineWidth: 1.75 }
         Sparkline { id: sb; anchors.fill: parent; metric: card.metricB; samples: 120; color: card.hueB; maxValue: card.sharedTop; minScale: card.minScale; fill: false; lineWidth: 1.5 }
+
+        // Peak tags ride each trace's highest visible sample. Above the point by
+        // default; below when that would clip the top or collide with the other tag.
+        Repeater {
+            model: card.peakTags ? [sa, sb] : []
+            delegate: Text {
+                required property var modelData
+                required property int index
+                readonly property var s: modelData
+                readonly property var other: index === 0 ? sb : sa
+                readonly property bool clash: index === 1 && other.peakVisible
+                    && Math.abs(other.peakX - s.peakX) < width && Math.abs(other.peakY - s.peakY) < height + 4
+                readonly property bool below: s.peakY - height - 3 < 0 || clash
+                visible: s.peakVisible
+                text: card.fmt(s.peakValue)
+                color: index === 0 ? card.hue : card.hueB
+                font.family: Theme.mono
+                font.pixelSize: 10
+                x: Math.max(0, Math.min(plot.width - width, s.peakX - width / 2))
+                y: Math.min(plot.height - height, below ? s.peakY + 3 : s.peakY - height - 3)
+            }
+        }
     }
 
     RowLayout {

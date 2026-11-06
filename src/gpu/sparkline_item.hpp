@@ -33,6 +33,12 @@ class SparklineItem : public QQuickItem {
     // Peak of this series' own visible data (with headroom and the minScale floor),
     // regardless of maxValue. Lets two graphs agree on one shared scale.
     Q_PROPERTY(double dataPeak READ dataPeak NOTIFY dataPeakChanged)
+    // Highest sample currently on screen and where it sits, in item pixels, so a
+    // label can ride it. Follows the scroll; hops to the next highest when it exits.
+    Q_PROPERTY(double peakValue READ peakValue NOTIFY peakChanged)
+    Q_PROPERTY(double peakX READ peakX NOTIFY peakChanged)
+    Q_PROPERTY(double peakY READ peakY NOTIFY peakChanged)
+    Q_PROPERTY(bool peakVisible READ peakVisible NOTIFY peakChanged)
 
 public:
     explicit SparklineItem(QQuickItem* parent = nullptr);
@@ -55,6 +61,10 @@ public:
     void setMinScale(double v);
     double scaleTop() const { return top_; }
     double dataPeak() const { return data_peak_; }
+    double peakValue() const { return peak_value_; }
+    double peakX() const { return peak_x_; }
+    double peakY() const { return peak_y_; }
+    bool peakVisible() const { return peak_visible_; }
 
 signals:
     void metricChanged();
@@ -67,6 +77,7 @@ signals:
     void minScaleChanged();
     void scaleTopChanged();
     void dataPeakChanged();
+    void peakChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* old, UpdatePaintNodeData*) override;
@@ -80,6 +91,7 @@ private:
     void onFrame();
     void attachWindow(QQuickWindow* w);
     double targetTop() const;
+    void updatePeak();
 
     QString metric_;
     int samples_ = 60;
@@ -102,6 +114,8 @@ private:
     double age_ms_ = 0;           // render time minus newest knot time
     double top_ = 0;              // displayed scale, eased toward the target
     double last_frame_ms_ = 0;
+    double peak_value_ = 0, peak_x_ = 0, peak_y_ = 0;
+    bool peak_visible_ = false;
 
     QPointer<QQuickWindow> window_;
     QMetaObject::Connection frame_conn_;

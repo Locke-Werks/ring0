@@ -31,6 +31,7 @@ Item {
                 valueB: n.tx || 0
                 minScale: 256 * 1024
                 bits: true
+                peakTags: true
                 // Link speed is bits/s; traffic is bytes/s. The meter is link utilisation.
                 extra: n.link ? Theme.bitrate(n.link / 8) + " link" : ""
                 extraLevel: n.link ? ((n.rx || 0) + (n.tx || 0)) * 8 / n.link : -1
