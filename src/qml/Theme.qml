@@ -21,7 +21,8 @@ QtObject {
         { key: "disk",      hue: "#3fb27f" },
         { key: "network",   hue: "#3a9be8" },
         { key: "gpu",       hue: "#f0a030" },
-        { key: "forensic",  hue: "#9a9a9a" }
+        { key: "forensic",  hue: "#9a9a9a" },
+        { key: "inference", hue: "#e05ab0" }
     ]
 
     readonly property string font: "Segoe UI Variable Text"

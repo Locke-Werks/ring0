@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(ring0 VERSION 0.2.4 LANGUAGES CXX)
+project(ring0 VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,12 +14,15 @@ add_library(ring0_core STATIC ${RING0_CORE_SOURCES})
 target_include_directories(ring0_core PUBLIC src)
 target_compile_definitions(ring0_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(ring0_core PUBLIC
-    ntdll advapi32 iphlpapi pdh psapi wintrust crypt32 dbghelp shell32 ole32 uuid ws2_32 dxgi tdh)
+    ntdll advapi32 iphlpapi pdh psapi wintrust crypt32 dbghelp shell32 ole32 uuid ws2_32 dxgi tdh winhttp)
 
 enable_testing()
 add_executable(etw_parse_test tests/etw_parse_test.cpp)
 target_include_directories(etw_parse_test PRIVATE src)
 add_test(NAME etw_parse COMMAND etw_parse_test)
+add_executable(inference_parse_test tests/inference_parse_test.cpp)
+target_include_directories(inference_parse_test PRIVATE src)
+add_test(NAME inference_parse COMMAND inference_parse_test)
 
 file(GLOB RING0_APP_SOURCES CONFIGURE_DEPENDS src/app/*.cpp src/gpu/*.cpp)
 # Listing the manifest as a source makes Qt skip generating its own.

@@ -26,6 +26,17 @@ double metric_of(const Snapshot& s, const QString& metric)
         for (const auto& c : s.cores) k += c.kernel;
         return k / double(s.cores.size());
     }
+    if (metric == u"infer") {
+        double v = 0;
+        for (const auto& p : s.inference) v += double(p.vram);
+        return v;
+    }
+    if (metric.startsWith(u"infer:")) {
+        const auto pid = metric.mid(6).toUInt();
+        for (const auto& p : s.inference)
+            if (p.pid == pid) return double(p.vram);
+        return 0.0;
+    }
     if (metric == u"commit") {
         const auto& m = s.memory;
         return m.commit_limit ? 100.0 * double(m.commit_used) / double(m.commit_limit) : 0.0;
@@ -305,6 +316,44 @@ QVariantList SnapshotBridge::gpus() const
             {u"sharedUsed"_s, double(g.shared_used)},
             {u"sharedTotal"_s, double(g.shared_total)},
             {u"engines"_s, engines}});
+    }
+    return out;
+}
+
+QVariantList SnapshotBridge::inference() const
+{
+    QVariantList out;
+    auto s = current();
+    if (!s) return out;
+    static const QString kSource[] = {u"exact"_s, u"reported"_s, u"estimated"_s};
+    for (const auto& p : s->inference) {
+        QVariantList files, segments, warnings;
+        for (const auto& f : p.files)
+            files.push_back(QVariantMap{
+                {u"name"_s, QString::fromStdWString(f.name)},
+                {u"path"_s, QString::fromStdWString(f.path)},
+                {u"bytes"_s, double(f.bytes)},
+                {u"resident"_s, double(f.resident)},
+                {u"evidence"_s, QString::fromStdWString(f.evidence)}});
+        for (const auto& g : p.segments)
+            segments.push_back(QVariantMap{
+                {u"label"_s, QString::fromStdWString(g.label)},
+                {u"bytes"_s, double(g.bytes)},
+                {u"source"_s, kSource[std::min<int>(int(g.source), 2)]}});
+        for (const auto& w : p.warnings) warnings.push_back(QString::fromStdWString(w));
+        out.push_back(QVariantMap{
+            {u"pid"_s, int(p.pid)},
+            {u"name"_s, QString::fromStdWString(p.image_name)},
+            {u"kind"_s, QString::fromStdWString(p.kind)},
+            {u"runtimes"_s, QString::fromStdWString(p.runtimes)},
+            {u"vram"_s, double(p.vram)},
+            {u"shared"_s, double(p.shared)},
+            {u"workingSet"_s, double(p.working_set)},
+            {u"tokensPerS"_s, double(p.tokens_per_s)},
+            {u"busySlots"_s, p.busy_slots},
+            {u"files"_s, files},
+            {u"segments"_s, segments},
+            {u"warnings"_s, warnings}});
     }
     return out;
 }

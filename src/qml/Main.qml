@@ -90,6 +90,7 @@ Window {
                 NetworkView {}
                 GpuView {}
                 ForensicView { id: forensic }
+                InferenceView {}
             }
 
             Scrubber {

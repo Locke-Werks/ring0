@@ -24,5 +24,6 @@ std::unique_ptr<Sampler> make_net_sampler();
 std::unique_ptr<Sampler> make_gpu_sampler();      // also fills Process::gpu_100ns/gpu_pct; runs after process
 std::unique_ptr<Sampler> make_thermal_sampler();
 std::unique_ptr<Sampler> make_etw_sampler();      // owns the ETW session; folds totals into Process
+std::unique_ptr<Sampler> make_inference_sampler(); // reads gpu_dedicated/gpu_shared; runs after gpu
 
 } // namespace ring0

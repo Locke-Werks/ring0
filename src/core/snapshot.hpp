@@ -33,6 +33,8 @@ struct Process {
     std::uint64_t cpu_100ns = 0;         // kernel + user, cumulative
     std::uint64_t gpu_100ns = 0;         // cumulative across adapters and engines
     std::uint64_t gpu_dedicated = 0;     // bytes of dedicated VRAM this process holds, all adapters
+    std::uint64_t gpu_shared = 0;        // system RAM mapped for the GPU (spill when VRAM is full)
+    std::uint64_t gpu_committed = 0;     // everything the process allocated, resident or paged out
     std::uint64_t io_read_bytes = 0;
     std::uint64_t io_write_bytes = 0;
     std::uint64_t etw_disk_bytes = 0;    // cumulative, from the ETW DiskIo provider
@@ -95,6 +97,38 @@ struct Gpu {
     std::vector<GpuEngine> engines;
 };
 
+// Where a number in the inference breakdown came from, best first.
+enum class Provenance : std::uint8_t { Exact, Reported, Estimated };
+
+struct WeightFile {
+    std::wstring  name;                  // friendly: "llama3.1:8b", "org/repo", or the file name
+    std::wstring  path;
+    std::uint64_t bytes = 0;             // file size
+    std::uint64_t resident = 0;          // bytes of the mapping in the working set; 0 if not mapped
+    std::wstring  evidence;              // "mapped", "launch arg", "reported"
+};
+
+struct VramSegment {
+    std::wstring  label;                 // "weights", "kv cache", "compute", "other"
+    std::uint64_t bytes = 0;
+    Provenance    source = Provenance::Estimated;
+};
+
+struct InferenceProc {
+    std::uint32_t pid = 0;
+    std::wstring  image_name;
+    std::wstring  kind;                  // "text", "diffusion", "embedding", "speech", "runtime"
+    std::wstring  runtimes;              // comma list of detected runtime libraries
+    std::uint64_t vram = 0;              // OS-reported dedicated
+    std::uint64_t shared = 0;            // OS-reported non-local
+    std::uint64_t working_set = 0;
+    std::vector<WeightFile>  files;
+    std::vector<VramSegment> segments;   // sums to vram when built
+    float         tokens_per_s = -1;     // -1 when no server reports it
+    int           busy_slots = -1;
+    std::vector<std::wstring> warnings;
+};
+
 struct Snapshot {
     std::uint64_t seq = 0;
     std::uint64_t tick_ms = 0;    // GetTickCount64 at sample time
@@ -110,6 +144,7 @@ struct Snapshot {
     std::vector<Disk> disks;
     std::vector<NetIf> ifaces;
     std::vector<Gpu> gpus;
+    std::vector<InferenceProc> inference;
     // Machine roll-ups for the scrubber strip.
     float disk_bps_total = 0;
     float net_bps_total = 0;

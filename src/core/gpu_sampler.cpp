@@ -260,24 +260,38 @@ private:
         // mapping desktop surfaces read 42 GB on a 24 GB card.
         if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Process Memory(*)\\Local Usage", 0, &c_proc_dedicated_) != ERROR_SUCCESS)
             c_proc_dedicated_ = nullptr;
+        // Non Local Usage is system RAM the GPU maps over the bus: what spills when VRAM runs out.
+        if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Process Memory(*)\\Non Local Usage", 0, &c_proc_shared_) != ERROR_SUCCESS)
+            c_proc_shared_ = nullptr;
+        if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Process Memory(*)\\Total Committed", 0, &c_proc_committed_) != ERROR_SUCCESS)
+            c_proc_committed_ = nullptr;
         if (PdhAddEnglishCounterW(pdh_.get(), L"\\GPU Engine(*)\\Utilization Percentage", 0, &c_engine_) != ERROR_SUCCESS)
             c_engine_ = nullptr;
         // Utilization is a rate; prime it so the first real sample has a baseline.
         PdhCollectQueryData(pdh_.get());
     }
 
-    void sample_process_memory(Snapshot& out) const {
-        std::unordered_map<std::uint32_t, std::uint64_t> by_pid;
-        for_each_item(c_proc_dedicated_, [&](const wchar_t* n, std::uint64_t v) {
+    static void sum_by_pid(PDH_HCOUNTER c, std::unordered_map<std::uint32_t, std::uint64_t>& by_pid) {
+        if (!c) return;
+        for_each_item(c, [&](const wchar_t* n, std::uint64_t v) {
             if (!n || std::wcsncmp(n, L"pid_", 4) != 0) return;
             wchar_t* end = nullptr;
             const auto pid = std::wcstoul(n + 4, &end, 10);
             if (end == n + 4) return;
             by_pid[static_cast<std::uint32_t>(pid)] += v;
         });
-        if (by_pid.empty()) return;
-        for (auto& p : out.processes)
-            if (auto it = by_pid.find(p.pid); it != by_pid.end()) p.gpu_dedicated = it->second;
+    }
+
+    void sample_process_memory(Snapshot& out) const {
+        std::unordered_map<std::uint32_t, std::uint64_t> local, shared, committed;
+        sum_by_pid(c_proc_dedicated_, local);
+        sum_by_pid(c_proc_shared_, shared);
+        sum_by_pid(c_proc_committed_, committed);
+        for (auto& p : out.processes) {
+            if (auto it = local.find(p.pid); it != local.end()) p.gpu_dedicated = it->second;
+            if (auto it = shared.find(p.pid); it != shared.end()) p.gpu_shared = it->second;
+            if (auto it = committed.find(p.pid); it != committed.end()) p.gpu_committed = it->second;
+        }
     }
 
     void enumerate() {
@@ -522,6 +536,8 @@ private:
     PDH_HCOUNTER         c_dedicated_ = nullptr;
     PDH_HCOUNTER         c_shared_ = nullptr;
     PDH_HCOUNTER         c_proc_dedicated_ = nullptr;
+    PDH_HCOUNTER         c_proc_shared_ = nullptr;
+    PDH_HCOUNTER         c_proc_committed_ = nullptr;
     PDH_HCOUNTER         c_engine_ = nullptr;
 };
 

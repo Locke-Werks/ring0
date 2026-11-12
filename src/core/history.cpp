@@ -66,6 +66,7 @@ void SamplerThread::run(std::stop_token st)
     samplers.push_back(make_gpu_sampler());
     samplers.push_back(make_thermal_sampler());
     samplers.push_back(make_etw_sampler());
+    samplers.push_back(make_inference_sampler());
 
     // A waitable event lets the destructor's stop request cut the sleep short.
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);

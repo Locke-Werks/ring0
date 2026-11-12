@@ -76,6 +76,7 @@ public:
     Q_INVOKABLE QVariantList disks() const;
     Q_INVOKABLE QVariantList ifaces() const;
     Q_INVOKABLE QVariantList gpus() const;
+    Q_INVOKABLE QVariantList inference() const;
     // Oldest-to-newest values of one metric for a graph. metric: "cpu", "mem",
     // "gpu", "disk", "net", "commit", "core:N", "disk:N[:r|w]", "net:N[:rx|tx]", "gpu:A[:E]".
     Q_INVOKABLE QList<double> series(const QString& metric, int n) const;
