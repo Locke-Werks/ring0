@@ -107,4 +107,8 @@ Window {
         function onFailed(action, pid, message) { toast.show(action + (pid > 0 ? " " + pid : "") + " failed: " + message, true) }
         function onSucceeded(action, pid) { if (action !== "open location") toast.show(action + (pid > 0 ? " " + pid : ""), false) }
     }
+    Connections {
+        target: CoreControl
+        function onFailed(message) { toast.show("evacuate failed: " + message, true) }
+    }
 }

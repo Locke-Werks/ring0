@@ -18,6 +18,40 @@ Item {
     }
     function count(n) { return n >= 10000 ? (n / 1000).toFixed(1) + "k" : Math.round(n).toString() }
 
+    // Core selection for the evacuate menu. Reassigned on every change so tile
+    // bindings re-evaluate; a sparse object keyed by index.
+    property var selected: ({})
+    property int anchorCore: -1
+    readonly property var evacuated: CoreControl.evacuated
+    function isSelected(i) { return selected[i] === true }
+    function isEvacuated(i) { return evacuated.indexOf(i) >= 0 }
+    function selectedList() { return Object.keys(selected).map(Number).sort((a, b) => a - b) }
+    function selectOnly(i) { const s = {}; s[i] = true; selected = s; anchorCore = i }
+    function toggle(i) { const s = Object.assign({}, selected); if (s[i]) delete s[i]; else s[i] = true; selected = s; anchorCore = i }
+    function clearSelection() { selected = ({}); anchorCore = -1 }
+    function selectRange(a, b, add) {
+        const s = add ? Object.assign({}, selected) : {}
+        for (let i = Math.min(a, b); i <= Math.max(a, b); ++i) s[i] = true
+        selected = s
+    }
+    function selectBox(a, b) {
+        const c = grid.cols
+        const r0 = Math.min(Math.floor(a / c), Math.floor(b / c)), r1 = Math.max(Math.floor(a / c), Math.floor(b / c))
+        const c0 = Math.min(a % c, b % c), c1 = Math.max(a % c, b % c)
+        const s = {}
+        for (let r = r0; r <= r1; ++r)
+            for (let k = c0; k <= c1; ++k)
+                if (r * c + k < cores) s[r * c + k] = true
+        selected = s
+    }
+    // Evacuating has to leave at least one core for ordinary work.
+    function canEvacuate(list) {
+        if (!list.length) return false
+        const union = new Set(evacuated)
+        list.forEach(i => union.add(i))
+        return union.size < cores
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 20
@@ -114,6 +148,17 @@ Item {
             }
         }
 
+        Text {
+            visible: view.evacuated.length > 0
+            Layout.fillWidth: true
+            text: view.evacuated.length + (view.evacuated.length === 1 ? " core" : " cores") + " evacuated  ·  "
+                  + CoreControl.moved + " processes moved  ·  " + CoreControl.refused + " refused (protected)"
+                  + "  ·  kernel work still runs there"
+            color: Theme.dim
+            font.family: Theme.font
+            font.pixelSize: 12
+        }
+
         GridView {
             id: grid
             Layout.fillWidth: true
@@ -195,7 +240,111 @@ Item {
                         font.features: { "tnum": 1 }
                     }
                 }
+
+                // Evacuated: dimmed, so the near-idle graph reads as intended.
+                Rectangle {
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    radius: Theme.radius
+                    visible: view.isEvacuated(cell.index)
+                    color: Qt.rgba(0, 0, 0, 0.55)
+                    Text {
+                        anchors.centerIn: parent
+                        text: "evacuated"
+                        color: Theme.dim
+                        font.family: Theme.font
+                        font.pixelSize: 12
+                    }
+                }
+                Rectangle {
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    radius: Theme.radius
+                    visible: view.isSelected(cell.index)
+                    color: Qt.rgba(view.hue.r, view.hue.g, view.hue.b, 0.10)
+                    border.width: 2
+                    border.color: view.hue
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    // Keeps a drag-select from turning into a flick of the grid.
+                    preventStealing: true
+                    property bool dragged: false
+
+                    onPressed: (mouse) => {
+                        dragged = false
+                        if (mouse.button === Qt.RightButton) {
+                            if (!view.isSelected(cell.index)) view.selectOnly(cell.index)
+                            coreMenu.popup()
+                        } else if (mouse.modifiers & Qt.ControlModifier) {
+                            view.toggle(cell.index)
+                        } else if ((mouse.modifiers & Qt.ShiftModifier) && view.anchorCore >= 0) {
+                            view.selectRange(view.anchorCore, cell.index, false)
+                        }
+                    }
+                    onPositionChanged: (mouse) => {
+                        if (!(pressedButtons & Qt.LeftButton) || (mouse.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))) return
+                        const p = mapToItem(grid.contentItem, mouse.x, mouse.y)
+                        const i = grid.indexAt(p.x, p.y)
+                        if (i < 0 || (!dragged && i === cell.index)) return
+                        dragged = true
+                        view.anchorCore = cell.index
+                        view.selectBox(cell.index, i)
+                    }
+                    onClicked: (mouse) => {
+                        if (dragged || mouse.button !== Qt.LeftButton || (mouse.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))) return
+                        const list = view.selectedList()
+                        if (list.length === 1 && list[0] === cell.index) view.clearSelection()
+                        else view.selectOnly(cell.index)
+                    }
+                }
             }
         }
+    }
+
+    Menu {
+        id: coreMenu
+        readonly property var picked: view.selectedList()
+        readonly property var pickedEvacuated: picked.filter(i => view.isEvacuated(i))
+        readonly property var pickedLive: picked.filter(i => !view.isEvacuated(i))
+        readonly property string noun: pickedLive.length === 1 ? "core " + pickedLive[0] : pickedLive.length + " cores"
+
+        background: Rectangle { implicitWidth: 240; color: Theme.surface2; border.color: Theme.line; radius: Theme.radius }
+        enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 120 } }
+        exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: 90 } }
+        delegate: MenuItem {
+            id: mi
+            contentItem: Text {
+                text: mi.text
+                color: mi.enabled ? (mi.highlighted ? "#ffffff" : Theme.text) : Theme.faint
+                font.family: Theme.font
+                font.pixelSize: 13
+                leftPadding: 6
+            }
+            background: Rectangle { color: mi.highlighted ? Qt.rgba(view.hue.r, view.hue.g, view.hue.b, 0.35) : "transparent"; radius: 4 }
+        }
+
+        MenuItem {
+            text: view.canEvacuate(coreMenu.pickedLive) || !coreMenu.pickedLive.length
+                  ? "evacuate " + coreMenu.noun
+                  : "evacuate " + coreMenu.noun + " (needs one core left)"
+            enabled: view.canEvacuate(coreMenu.pickedLive)
+            onTriggered: CoreControl.evacuate(coreMenu.pickedLive)
+        }
+        MenuItem {
+            text: "restore " + (coreMenu.pickedEvacuated.length === 1 ? "core " + coreMenu.pickedEvacuated[0] : coreMenu.pickedEvacuated.length + " cores")
+            enabled: coreMenu.pickedEvacuated.length > 0
+            onTriggered: CoreControl.restore(coreMenu.pickedEvacuated)
+        }
+        MenuItem {
+            text: "restore all cores"
+            enabled: view.evacuated.length > 0
+            onTriggered: CoreControl.restoreAll()
+        }
+        MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: Theme.line } }
+        MenuItem { text: "select all"; onTriggered: view.selectRange(0, view.cores - 1, false) }
+        MenuItem { text: "clear selection"; enabled: coreMenu.picked.length > 0; onTriggered: view.clearSelection() }
     }
 }
