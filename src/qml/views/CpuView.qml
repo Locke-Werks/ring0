@@ -148,15 +148,61 @@ Item {
             }
         }
 
-        Text {
-            visible: view.evacuated.length > 0
+        RowLayout {
             Layout.fillWidth: true
-            text: view.evacuated.length + (view.evacuated.length === 1 ? " core" : " cores") + " evacuated  ·  "
-                  + CoreControl.moved + " processes moved  ·  " + CoreControl.refused + " refused (protected)"
-                  + "  ·  kernel work still runs there"
-            color: Theme.dim
-            font.family: Theme.font
-            font.pixelSize: 12
+            spacing: 12
+
+            // Power cap. The far right of the track means uncapped; the cap only
+            // engages when the handle is released, not on every pixel of a drag.
+            Text { text: "power cap"; color: Theme.faint; font.family: Theme.font; font.pixelSize: 12 }
+            Slider {
+                id: capSlider
+                readonly property int uncapped: 205
+                Layout.preferredWidth: 240
+                enabled: PowerCap.available
+                from: 40; to: uncapped; stepSize: 5
+                value: PowerCap.target > 0 ? PowerCap.target : uncapped
+                onPressedChanged: if (!pressed) PowerCap.setTarget(value >= uncapped ? 0 : value)
+                background: Rectangle {
+                    x: capSlider.leftPadding
+                    y: capSlider.topPadding + capSlider.availableHeight / 2 - height / 2
+                    width: capSlider.availableWidth; height: 4; radius: 2
+                    color: Theme.line
+                    Rectangle {
+                        width: capSlider.visualPosition * parent.width; height: parent.height; radius: 2
+                        color: capSlider.value >= capSlider.uncapped ? Theme.faint : view.hue
+                    }
+                }
+                handle: Rectangle {
+                    x: capSlider.leftPadding + capSlider.visualPosition * (capSlider.availableWidth - width)
+                    y: capSlider.topPadding + capSlider.availableHeight / 2 - height / 2
+                    width: 14; height: 14; radius: 7
+                    color: capSlider.pressed ? "#ffffff" : Theme.text
+                }
+            }
+            Text {
+                text: capSlider.value >= capSlider.uncapped ? "uncapped"
+                      : capSlider.value.toFixed(0) + " W"
+                        + (PowerCap.target > 0 && !capSlider.pressed
+                           ? "  ·  now " + (SnapshotBridge.cpuPowerW >= 0 ? SnapshotBridge.cpuPowerW.toFixed(0) + " W" : "n/a")
+                             + "  ·  max state " + PowerCap.maxState + "%" + (PowerCap.boost ? "" : ", boost off")
+                             + (PowerCap.atFloor && SnapshotBridge.cpuPowerW > PowerCap.target * 1.03 ? "  ·  lowest step, cannot go lower" : "")
+                           : "")
+                color: PowerCap.target > 0 ? Theme.text : Theme.dim
+                font.family: Theme.font
+                font.pixelSize: 12
+                font.features: { "tnum": 1 }
+            }
+            Item { Layout.fillWidth: true }
+            Text {
+                visible: view.evacuated.length > 0
+                text: view.evacuated.length + (view.evacuated.length === 1 ? " core" : " cores") + " evacuated  ·  "
+                      + CoreControl.moved + " processes moved  ·  " + CoreControl.refused + " refused (protected)"
+                      + "  ·  kernel work still runs there"
+                color: Theme.dim
+                font.family: Theme.font
+                font.pixelSize: 12
+            }
         }
 
         GridView {

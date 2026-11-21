@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(ring0 VERSION 0.4.0 LANGUAGES CXX)
+project(ring0 VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,7 +14,7 @@ add_library(ring0_core STATIC ${RING0_CORE_SOURCES})
 target_include_directories(ring0_core PUBLIC src)
 target_compile_definitions(ring0_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(ring0_core PUBLIC
-    ntdll advapi32 iphlpapi pdh psapi wintrust crypt32 dbghelp shell32 ole32 uuid ws2_32 dxgi tdh winhttp)
+    ntdll advapi32 iphlpapi pdh psapi wintrust crypt32 dbghelp shell32 ole32 uuid ws2_32 dxgi tdh winhttp powrprof)
 
 enable_testing()
 add_executable(etw_parse_test tests/etw_parse_test.cpp)

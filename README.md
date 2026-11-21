@@ -16,7 +16,7 @@
 
 ![ring0 cpu view](assets/screenshot.webp)
 
-Seven views: processes, cpu, memory, disk, network, gpu, forensic. Every graph is a
+Eight views: processes, cpu, memory, disk, network, gpu, forensic, inference. Every graph is a
 scene-graph node with its own shaders; history scrolls at one constant speed, keyed
 to sample timestamps rather than to when a sample happened to arrive.
 
@@ -36,6 +36,29 @@ to sample timestamps rather than to when a sample happened to arrive.
   modules with signers, sockets, folded thread stacks, and plain findings (unsigned
   images or modules, binaries in user-writable folders, system binaries with the
   wrong parent).
+
+## What it changes
+
+Both controls live on the cpu view and undo themselves when ring0 exits.
+
+- **Core evacuation.** Select cores (click, Ctrl+click, Shift+click, or drag a box),
+  right-click, evacuate. Every process is steered off them with CPU Sets, falling back
+  to affinity masks; processes started later are caught within a second. Protected
+  processes refuse and are counted. The kernel still schedules interrupts and its own
+  threads there, so this empties a core of ordinary work rather than taking it
+  offline. At least one core always stays available. On SMT parts adjacent numbers
+  are the two threads of one physical core; evacuate both to let the core sleep.
+- **Power cap.** A slider from 40 W to uncapped. Once a second ring0 compares package
+  power against the target and steps the active power plan: boost off first, then
+  maximum processor state down in 5% steps to 30%. It is a feedback loop, not a
+  firmware limit, so a sudden load can overshoot for a second. How low it reaches
+  depends on the CPU; a Ryzen 9 7950X under all-core load bottoms out near 60-65 W.
+  The label says when the lowest step is reached. The original plan values are saved
+  before the first change, and restored on exit or at the next launch after a crash.
+  Needs a package power reading, so it is inert without PawnIO.
+
+A crash while cores are evacuated leaves the moved processes off those cores until
+they exit or the machine restarts.
 
 CPU power, clocks and chiplet temperatures, and DDR5 temperatures, are read through
 [PawnIO](https://pawnio.eu), a signed open-source driver. The installer offers it.

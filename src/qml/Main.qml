@@ -111,4 +111,8 @@ Window {
         target: CoreControl
         function onFailed(message) { toast.show("evacuate failed: " + message, true) }
     }
+    Connections {
+        target: PowerCap
+        function onFailed(message) { toast.show("power cap failed: " + message, true) }
+    }
 }
