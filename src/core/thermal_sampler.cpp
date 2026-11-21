@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "core/timebase.hpp"
 #include "core/sampler.hpp"
 #include "core/pawnio.hpp"
 
@@ -264,7 +265,7 @@ public:
         if (!module_) init_pdh();
     }
 
-    void sample(Snapshot& out, const Snapshot*, double dt_seconds) override {
+    void sample(Snapshot& out, const Snapshot*, double) override {
         out.cpu_temp_c = -1;
         out.ccd_temps_c.clear();
         out.cpu_power_w = -1;
@@ -280,9 +281,9 @@ public:
         } else {
             out.cpu_temp_c = read_intel_package();
         }
-        read_power(out, dt_seconds);
+        read_power(out);
         try {
-            per_core_pass(out, dt_seconds);
+            per_core_pass(out);
         } catch (...) {
             out.ccd_temps_c.clear();
             out.core_mhz.clear();
@@ -337,6 +338,7 @@ private:
             phys_.clear();
         }
         prev_aperf_.assign(cpus_.size(), std::nullopt);
+        prev_aperf_ms_.assign(cpus_.size(), 0.0);
 
         // Hybrid Intel parts can fuse a different TjMax per core type, so it is read per
         // core once here, falling back to the package value.
@@ -397,16 +399,22 @@ private:
     }
 
     // Package energy is a package-scope MSR, so any core answers with the same counter.
-    void read_power(Snapshot& out, double dt_seconds) {
+    // The interval is timed around the read itself rather than taken from the pass:
+    // the samplers ahead of this one take a variable time under load, so the pass
+    // start says little about when the counter was actually read.
+    void read_power(Snapshot& out) {
         if (joules_per_count_ <= 0) return;
         auto r = module_.call1("ioctl_read_msr", amd_ ? kAmdPkgEnergyStat : kPkgEnergyStatus);
+        const double t = timebase::now_ms();
         if (!r) {
             prev_energy_.reset();
             return;
         }
         const auto now = static_cast<std::uint32_t>(*r);
-        if (prev_energy_) out.cpu_power_w = energy_to_watts(now, *prev_energy_, joules_per_count_, dt_seconds);
+        if (prev_energy_)
+            out.cpu_power_w = energy_to_watts(now, *prev_energy_, joules_per_count_, (t - prev_energy_ms_) / 1000.0);
         prev_energy_ = now;
+        prev_energy_ms_ = t;
     }
 
     // Cost, per sample on the 7950X: 32 migrations plus 32 APERF ioctls. An ioctl into
@@ -416,7 +424,7 @@ private:
     // 0.1% of one core at a 1 s interval, so clocks are read every sample. MPERF is not
     // read: effective clock needs only APERF over wall time, and skipping it halves the
     // ioctls. CCD temperatures stay out of this loop entirely since SMN is package-wide.
-    void per_core_pass(Snapshot& out, double dt_seconds) {
+    void per_core_pass(Snapshot& out) {
         if (cpus_.empty() && phys_.empty()) return;
         PinGuard guard;
         if (!guard.ok()) return;
@@ -442,10 +450,14 @@ private:
         std::vector<float> mhz(cpus_.size(), -1.0f);
         for (std::size_t i = 0; i < cpus_.size(); ++i) {
             std::optional<std::uint64_t> now;
+            double t = 0;
             if (guard.pin(cpus_[i])) {
                 if (auto r = module_.call1("ioctl_read_msr", aperf_msr_)) now = *r;
+                t = timebase::now_ms();
             }
             auto& prev = prev_aperf_[i];
+            const double dt_seconds = (t - prev_aperf_ms_[i]) / 1000.0;
+            prev_aperf_ms_[i] = t;
             // APERF advances at the actual clock only while the core is in C0, so its rate
             // over wall time is the effective clock, idle time included. A counter that went
             // backwards was reset or wrapped; 64 bits at 6 GHz cannot wrap in practice, so
@@ -514,12 +526,14 @@ private:
 
     double joules_per_count_ = 0;
     std::optional<std::uint32_t> prev_energy_;
+    double prev_energy_ms_ = 0;
 
     std::uint64_t aperf_msr_ = 0;
     std::vector<GROUP_AFFINITY> cpus_;
     std::vector<GROUP_AFFINITY> phys_;
     std::vector<float> core_tjmax_;
     std::vector<std::optional<std::uint64_t>> prev_aperf_;
+    std::vector<double> prev_aperf_ms_;
 
     PdhQuery query_;
     PDH_HCOUNTER counter_ = nullptr;

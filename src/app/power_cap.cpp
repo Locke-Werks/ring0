@@ -47,17 +47,20 @@ bool PowerCap::atFloor() const { return level_ == kLast; }
 
 void PowerCap::setTarget(int watts)
 {
-    if (watts <= 0) {
-        release();
-        target_ = 0;
-        emit changed();
-        return;
-    }
     if (!available_) {
         emit failed(u"the active power plan cannot be read"_s);
         return;
     }
-    if (!orig_) save_original();
+    if (watts <= 0) {
+        // Uncapped is full speed in the active plan, written permanently, whatever
+        // the plan held before.
+        release();
+        if (const auto a = power_plan::active()) write_step(*a, 0);
+        target_ = 0;
+        emit changed();
+        return;
+    }
+    if (!scheme_) remember(power_plan::active());
     target_ = watts;
     emit changed();
     tick();
@@ -65,7 +68,17 @@ void PowerCap::setTarget(int watts)
 
 void PowerCap::tick()
 {
-    if (target_ <= 0) return;
+    if (target_ <= 0 || !scheme_) return;
+
+    // The user switched plans while capped: the plan that was capped is left at
+    // full speed, and the cap carries on against the new one.
+    if (const auto a = power_plan::active(); a && *a != *scheme_) {
+        write_step(*scheme_, 0);
+        remember(a);
+        level_ = 0;
+        emit changed();
+    }
+
     const double w = SnapshotBridge::instance()->cpuPowerW();
     if (w < 0) return;   // no power reading on this CPU: hold the current level
 
@@ -74,59 +87,60 @@ void PowerCap::tick()
     else if (w > target_ * 1.03) next += 1;
     else if (w < target_ * 0.85) next -= 1;
     next = std::clamp(next, 0, kLast);
-    if (next != level_) apply(next);
+    if (next != level_ || !applied_) apply(next);
 }
 
 void PowerCap::apply(int level)
 {
-    if (!orig_) return;
-    power_plan::Settings s = *orig_;
-    const Step st = kLadder[level];
-    if (level > 0) {
-        s.max_state_ac = std::min<std::uint32_t>(s.max_state_ac, st.max_state);
-        s.max_state_dc = std::min<std::uint32_t>(s.max_state_dc, st.max_state);
-        if (!st.boost) s.boost_ac = s.boost_dc = 0;
-    }
-    if (!power_plan::write(s)) {
+    if (!scheme_) return;
+    if (!write_step(*scheme_, level)) {
         emit failed(u"cannot write the power plan"_s);
         return;
     }
     level_ = level;
+    applied_ = true;
     emit changed();
 }
 
+bool PowerCap::write_step(const power_plan::SchemeId& scheme, int level)
+{
+    const Step st = kLadder[level];
+    power_plan::Settings s;
+    s.scheme = scheme;
+    s.max_state_ac = s.max_state_dc = std::uint32_t(st.max_state);
+    s.boost_ac = s.boost_dc = st.boost ? 2u : 0u;   // 2 is "aggressive", the Windows default
+    return power_plan::write(s);
+}
+
+// Leaves the capped plan at full speed.
 void PowerCap::release()
 {
-    if (!orig_) return;
-    power_plan::write(*orig_);
-    orig_.reset();
+    if (scheme_) write_step(*scheme_, 0);
+    scheme_.reset();
     level_ = 0;
+    applied_ = false;
     QSettings().remove(u"powercap"_s);
 }
 
-void PowerCap::save_original()
+void PowerCap::remember(const std::optional<power_plan::SchemeId>& scheme)
 {
-    orig_ = power_plan::read();
-    if (!orig_) return;
-    QSettings q;
-    q.beginGroup(u"powercap"_s);
-    q.setValue(u"max_ac"_s, orig_->max_state_ac);
-    q.setValue(u"max_dc"_s, orig_->max_state_dc);
-    q.setValue(u"boost_ac"_s, orig_->boost_ac);
-    q.setValue(u"boost_dc"_s, orig_->boost_dc);
-    q.endGroup();
+    scheme_ = scheme;
+    applied_ = false;
+    if (!scheme_) return;
+    QSettings().setValue(u"powercap/scheme"_s,
+        QByteArray(reinterpret_cast<const char*>(scheme_->data()), int(scheme_->size())).toHex());
 }
 
-// A previous run that died with the cap engaged left its originals behind.
+// A previous run that died with the cap engaged: put that plan back to full speed.
+// Entries from 0.5.0 carry no plan id and are dropped rather than guessed at.
 void PowerCap::recover()
 {
     QSettings q;
-    if (!q.contains(u"powercap/max_ac"_s)) return;
-    power_plan::Settings s;
-    s.max_state_ac = q.value(u"powercap/max_ac"_s).toUInt();
-    s.max_state_dc = q.value(u"powercap/max_dc"_s).toUInt();
-    s.boost_ac = q.value(u"powercap/boost_ac"_s).toUInt();
-    s.boost_dc = q.value(u"powercap/boost_dc"_s).toUInt();
-    power_plan::write(s);
+    const QByteArray id = QByteArray::fromHex(q.value(u"powercap/scheme"_s).toByteArray());
+    if (id.size() == 16) {
+        power_plan::SchemeId s;
+        std::copy(id.begin(), id.end(), s.begin());
+        write_step(s, 0);
+    }
     q.remove(u"powercap"_s);
 }

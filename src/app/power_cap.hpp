@@ -14,8 +14,10 @@
 // watts. It is a feedback loop on clocks, not a firmware limit, so a sudden load
 // can overshoot for a second before the next step lands.
 //
-// The original plan values are saved to QSettings before the first change, so a
-// crash is undone at the next launch rather than leaving the plan capped.
+// Uncapped means full speed: releasing the cap, or dragging to uncapped, writes
+// 100% maximum processor state and boost on into the plan and leaves it there.
+// Which plan is capped is saved to QSettings, so a crash is undone at the next
+// launch rather than leaving that plan throttled.
 class PowerCap : public QObject {
     Q_OBJECT
     QML_ELEMENT
@@ -49,12 +51,14 @@ signals:
 private:
     void tick();
     void apply(int level);
+    bool write_step(const ring0::power_plan::SchemeId& scheme, int level);
     void release();
-    void save_original();
+    void remember(const std::optional<ring0::power_plan::SchemeId>& scheme);
     void recover();
 
     bool available_ = false;
     int target_ = 0;
     int level_ = 0;                                  // index into the ladder
-    std::optional<ring0::power_plan::Settings> orig_;
+    bool applied_ = false;                           // level_ has been written to scheme_
+    std::optional<ring0::power_plan::SchemeId> scheme_;   // the plan being capped
 };

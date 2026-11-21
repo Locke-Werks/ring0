@@ -39,7 +39,7 @@ to sample timestamps rather than to when a sample happened to arrive.
 
 ## What it changes
 
-Both controls live on the cpu view and undo themselves when ring0 exits.
+Both controls live on the cpu view.
 
 - **Core evacuation.** Select cores (click, Ctrl+click, Shift+click, or drag a box),
   right-click, evacuate. Every process is steered off them with CPU Sets, falling back
@@ -53,9 +53,11 @@ Both controls live on the cpu view and undo themselves when ring0 exits.
   maximum processor state down in 5% steps to 30%. It is a feedback loop, not a
   firmware limit, so a sudden load can overshoot for a second. How low it reaches
   depends on the CPU; a Ryzen 9 7950X under all-core load bottoms out near 60-65 W.
-  The label says when the lowest step is reached. The original plan values are saved
-  before the first change, and restored on exit or at the next launch after a crash.
-  Needs a package power reading, so it is inert without PawnIO.
+  The label says when the lowest step is reached. Uncapped means full speed: dragging
+  to uncapped, closing ring0, or reopening it after a crash writes 100% maximum
+  processor state and boost on into the plan and leaves them there, whatever the plan
+  held before. Switching plans while capped leaves the old plan at full speed and caps
+  the new one. Needs a package power reading, so it is inert without PawnIO.
 
 A crash while cores are evacuated leaves the moved processes off those cores until
 they exit or the machine restarts.
